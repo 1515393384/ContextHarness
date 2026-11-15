@@ -1,4 +1,5 @@
 import {promises as fs} from 'node:fs';
+import path from 'node:path';
 import {DeepSeekModelGateway} from './adapters/deepseek-gateway';
 import {
   LocalFsCodeIndexAdapter,
@@ -19,9 +20,10 @@ import type {
   AdapterProfile,
   HarnessWorkspaceSnapshot,
   RoleKind,
+  VerifyResult,
 } from './types';
 
-const STATE_PATH = '/tmp/contextharness-workspace-state.json';
+const STATE_PATH = path.join(process.cwd(), '.contextharness-workspace-state.json');
 
 function isDeepSeekConfigured(): boolean {
   return Boolean(
@@ -63,12 +65,17 @@ async function refreshPreviews(
   const targetRead = await workspace.readWithLineNumbers(active.targetFile, 1, 140);
   const testRead = await workspace.readWithLineNumbers(active.testFile, 1, 140);
 
-  snapshot.targetFilePreview = targetRead.ok
-    ? targetRead.value
-    : `// ${targetRead.error.message}`;
-  snapshot.testFilePreview = testRead.ok
-    ? testRead.value
-    : `// ${testRead.error.message}`;
+  if (targetRead.ok === true) {
+    snapshot.targetFilePreview = targetRead.value;
+  } else {
+    snapshot.targetFilePreview = `// ${targetRead.error.message}`;
+  }
+
+  if (testRead.ok === true) {
+    snapshot.testFilePreview = testRead.value;
+  } else {
+    snapshot.testFilePreview = `// ${testRead.error.message}`;
+  }
 }
 
 export async function createFreshSnapshot(
@@ -141,6 +148,7 @@ export async function loadSnapshot(): Promise<HarnessWorkspaceSnapshot> {
 export async function saveSnapshot(
   snapshot: HarnessWorkspaceSnapshot,
 ): Promise<void> {
+  await fs.mkdir(path.dirname(STATE_PATH), {recursive: true});
   await fs.writeFile(STATE_PATH, JSON.stringify(snapshot, null, 2), 'utf8');
 }
 
@@ -192,15 +200,18 @@ export async function verifyActiveTask(
   const ports = buildLocalPorts(snapshot.adapters);
   const startedAt = Date.now();
   const verifyRes = await ports.verifyProbe.runVerify(task);
-  const verify = verifyRes.ok
-    ? verifyRes.value
-    : {
-        passed: false,
-        stage: 'COMPILE' as const,
-        errorHash: verifyRes.error.code,
-        summary: verifyRes.error.message,
-        stackFrames: [],
-      };
+  let verify: VerifyResult;
+  if (verifyRes.ok === true) {
+    verify = verifyRes.value;
+  } else {
+    verify = {
+      passed: false,
+      stage: 'COMPILE' as const,
+      errorHash: verifyRes.error.code,
+      summary: verifyRes.error.message,
+      stackFrames: [],
+    };
+  }
 
   snapshot.lastVerify = verify;
   if (verify.passed) {

@@ -68,7 +68,7 @@ export class LocalFsCodeIndexAdapter implements CodeIndexPort {
     const sections: string[] = [];
     for (const relPath of scopeFiles) {
       const safe = resolveSafePath(this.rootDir, relPath);
-      if (!safe.ok) continue;
+      if (safe.ok === false) continue;
       try {
         const content = await fs.readFile(safe.value, 'utf8');
         const sigs = extractExportSignatures(content);
@@ -88,7 +88,7 @@ export class LocalFsCodeIndexAdapter implements CodeIndexPort {
     maxTokens: number,
   ): Promise<Result<string, HarnessError>> {
     const safe = resolveSafePath(this.rootDir, file);
-    if (!safe.ok) return safe;
+    if (safe.ok === false) return safe;
 
     try {
       const content = await fs.readFile(safe.value, 'utf8');
@@ -119,7 +119,7 @@ export class LocalFsCodeIndexAdapter implements CodeIndexPort {
     maxTokens: number,
   ): Promise<Result<string, HarnessError>> {
     const safe = resolveSafePath(this.rootDir, file);
-    if (!safe.ok) return safe;
+    if (safe.ok === false) return safe;
 
     try {
       const content = await fs.readFile(safe.value, 'utf8');
@@ -156,7 +156,7 @@ export class LocalFsWorkspaceAdapter implements WorkspaceEditPort {
     endLine?: number,
   ): Promise<Result<string, HarnessError>> {
     const safe = resolveSafePath(this.rootDir, file);
-    if (!safe.ok) return safe;
+    if (safe.ok === false) return safe;
 
     try {
       const content = await fs.readFile(safe.value, 'utf8');
@@ -182,12 +182,12 @@ export class LocalFsWorkspaceAdapter implements WorkspaceEditPort {
     lockZone: WriteLockZone,
   ): Promise<Result<{updatedContent: string}, HarnessError>> {
     const lockCheck = checkWriteLock(patch, lockZone);
-    if (!lockCheck.ok) {
-      return lockCheck;
+    if (lockCheck.ok === false) {
+      return {ok: false, error: lockCheck.error};
     }
 
     const safe = resolveSafePath(this.rootDir, patch.file);
-    if (!safe.ok) return safe;
+    if (safe.ok === false) return {ok: false, error: safe.error};
 
     try {
       const content = await fs.readFile(safe.value, 'utf8');
@@ -250,7 +250,7 @@ export class LocalFsWorkspaceAdapter implements WorkspaceEditPort {
     try {
       for (const [relFile, original] of fileMap.entries()) {
         const safe = resolveSafePath(this.rootDir, relFile);
-        if (!safe.ok) return safe;
+        if (safe.ok === false) return {ok: false, error: safe.error};
         await fs.writeFile(safe.value, original, 'utf8');
       }
       return ok(undefined);

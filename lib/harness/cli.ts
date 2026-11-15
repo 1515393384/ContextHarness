@@ -69,7 +69,7 @@ async function main(): Promise<void> {
 
   if (verifyOnly) {
     const verifyRes = await verifyProbe.runVerify(tasks[1]);
-    if (!verifyRes.ok) {
+    if (verifyRes.ok === false) {
       console.error(`[Verify Error] ${verifyRes.error.message}`);
       process.exit(1);
     }

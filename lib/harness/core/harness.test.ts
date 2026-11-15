@@ -58,7 +58,7 @@ function createMemoryPorts(files: Record<string, string>, failRounds = 0): Harne
     },
     async applyLinePatch(patch: LinePatch, lockZone: WriteLockZone) {
       const lockCheck = checkWriteLock(patch, lockZone);
-      if (!lockCheck.ok) return lockCheck;
+      if (lockCheck.ok === false) return {ok: false, error: lockCheck.error};
       const lines = (files[patch.file] ?? '').split('\n');
       const s = patch.startLine - 1;
       const e = Math.min(lines.length, patch.endLine);
@@ -219,7 +219,7 @@ test('DAG scheduler detects cycles and physical write-lock blocks tampering with
   ];
   const cycleRes = validateDag(cyclic);
   assert.equal(cycleRes.ok, false);
-  if (!cycleRes.ok) {
+  if (cycleRes.ok === false) {
     assert.equal(cycleRes.error.code, 'DAG_CYCLE_DETECTED');
   }
 
@@ -235,7 +235,7 @@ test('DAG scheduler detects cycles and physical write-lock blocks tampering with
     t02.writeLock,
   );
   assert.equal(lockBlockedTest.ok, false);
-  if (!lockBlockedTest.ok) {
+  if (lockBlockedTest.ok === false) {
     assert.equal(lockBlockedTest.error.code, 'WRITE_LOCK_VIOLATION');
   }
 

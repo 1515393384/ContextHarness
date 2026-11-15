@@ -43,7 +43,7 @@ export function validateDag(
     const task = byId.get(id)!;
     for (const dep of task.dependsOn) {
       const res = dfs(dep);
-      if (!res.ok) return res;
+      if (res.ok === false) return {ok: false, error: res.error};
     }
     visiting.delete(id);
     visited.add(id);
@@ -53,7 +53,7 @@ export function validateDag(
 
   for (const task of tasks) {
     const res = dfs(task.id);
-    if (!res.ok) return res;
+    if (res.ok === false) return {ok: false, error: res.error};
   }
 
   return ok(sorted);

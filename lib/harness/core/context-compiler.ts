@@ -168,9 +168,12 @@ export async function compileSlotFrame(
     task.targetSymbol,
     Math.floor(baseBudget.slot2MaxTokens * 0.65),
   );
-  const contractText = contractSliceRes.ok
-    ? contractSliceRes.value
-    : `// Missing contract slice: ${contractSliceRes.error.message}`;
+  let contractText = '';
+  if (contractSliceRes.ok === true) {
+    contractText = contractSliceRes.value;
+  } else {
+    contractText = `// Missing contract slice: ${contractSliceRes.error.message}`;
+  }
 
   let callerText = '';
   if (task.widened1Hop) {
@@ -207,11 +210,25 @@ export async function compileSlotFrame(
   );
   const testRead = await workspace.readWithLineNumbers(task.testFile, 1, 60);
 
+  let implText = '';
+  if (implRead.ok === true) {
+    implText = implRead.value;
+  } else {
+    implText = `// Error reading impl: ${implRead.error.message}`;
+  }
+
+  let testText = '';
+  if (testRead.ok === true) {
+    testText = testRead.value;
+  } else {
+    testText = `// Error reading tests: ${testRead.error.message}`;
+  }
+
   const rawSlot3 = [
     `[UNLOCKED_IMPL_SLICE ${task.targetFile}]`,
-    implRead.ok ? implRead.value : `// Error reading impl: ${implRead.error.message}`,
+    implText,
     `[READONLY_UNIT_ASSERTIONS ${task.testFile}]`,
-    testRead.ok ? testRead.value : `// Error reading tests: ${testRead.error.message}`,
+    testText,
   ].join('\n');
 
   const slot3Budget =

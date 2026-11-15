@@ -146,7 +146,7 @@ export async function runSingleStep(
   ports: HarnessPorts,
 ): Promise<StepOutcome> {
   const dagCheck = validateDag(state.tasks);
-  if (!dagCheck.ok) {
+  if (dagCheck.ok === false) {
     return {
       executed: false,
       finishedAll: false,
@@ -208,7 +208,8 @@ export async function runSingleStep(
     },
   );
 
-  if (!inferRes.ok) {
+  if (inferRes.ok === false) {
+    const gatewayError = inferRes.error;
     const trace: ExecutionTraceEntry = {
       id: `TR-${round}`,
       round,
@@ -225,7 +226,7 @@ export async function runSingleStep(
       errorHash: 'GW_ERR',
       ddiDecision: 'RETRY_SURGICAL_DEBUG',
       durationMs: Math.max(1, Date.now() - startedAt),
-      summary: `Model gateway failed: ${inferRes.error.message}`,
+      summary: `Model gateway failed: ${gatewayError.message}`,
     };
     state.traces.push(trace);
     state.lastFrame = frame;
@@ -247,7 +248,7 @@ export async function runSingleStep(
   );
 
   let verifyResult: VerifyResult;
-  if (!patchRes.ok) {
+  if (patchRes.ok === false) {
     verifyResult = {
       passed: false,
       stage: 'COMPILE',
@@ -260,15 +261,17 @@ export async function runSingleStep(
       nextTask,
       inferRes.value.requestedProbe ? [inferRes.value.requestedProbe] : undefined,
     );
-    verifyResult = verifyRes.ok
-      ? verifyRes.value
-      : {
-          passed: false,
-          stage: 'COMPILE',
-          errorHash: verifyRes.error.code,
-          summary: verifyRes.error.message,
-          stackFrames: [],
-        };
+    if (verifyRes.ok === true) {
+      verifyResult = verifyRes.value;
+    } else {
+      verifyResult = {
+        passed: false,
+        stage: 'COMPILE',
+        errorHash: verifyRes.error.code,
+        summary: verifyRes.error.message,
+        stackFrames: [],
+      };
+    }
   }
 
   const ddiEval = evaluateDdiDecision(nextTask, verifyResult);
