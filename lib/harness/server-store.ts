@@ -16,11 +16,25 @@ import {
   type OrchestratorState,
   type TaskPlanInput,
 } from './core/orchestrator';
-import type {
-  AdapterProfile,
-  HarnessWorkspaceSnapshot,
-  RoleKind,
-  VerifyResult,
+import {
+  ensureWorkspaceDirectory,
+  getDefaultSandboxDir,
+  listWorkspaceFiles,
+  readWorkspaceFileNumbered,
+  runWorkspaceChatTurn,
+  runWorkspaceVerify,
+} from './core/workspace-chat-agent';
+import {
+  err,
+  ok,
+  type AdapterProfile,
+  type ChatMessageEntry,
+  type HarnessError,
+  type HarnessWorkspaceSnapshot,
+  type ModelTier,
+  type Result,
+  type RoleKind,
+  type VerifyResult,
 } from './types';
 
 const STATE_PATH = path.join(process.cwd(), '.contextharness-workspace-state.json');
@@ -103,6 +117,11 @@ export async function createFreshSnapshot(
     modelAdapter: 'deepseek-v4.1-flash-1017',
   };
 
+  const sandboxReady = await ensureWorkspaceDirectory(getDefaultSandboxDir(), true);
+  const chatWorkspaceDir =
+    sandboxReady.ok === true ? sandboxReady.value : getDefaultSandboxDir();
+  const chatFiles = await listWorkspaceFiles(chatWorkspaceDir);
+
   const snapshot: HarnessWorkspaceSnapshot = {
     spec,
     tasks,
@@ -114,6 +133,10 @@ export async function createFreshSnapshot(
     lastVerify: null,
     adapters: activeAdapters,
     deepseekConfigured: isDeepSeekConfigured(),
+    chatWorkspaceDir,
+    chatVerifyCommand: '',
+    chatFiles,
+    chatMessages: [],
   };
 
   const ports = buildLocalPorts(activeAdapters);
@@ -155,6 +178,21 @@ export async function loadSnapshot(): Promise<HarnessWorkspaceSnapshot> {
         'token-budget.ts:32-78',
         'token-budget.ts:32-83',
       );
+    }
+
+    if (!parsed.chatWorkspaceDir) {
+      const ready = await ensureWorkspaceDirectory(getDefaultSandboxDir(), true);
+      parsed.chatWorkspaceDir =
+        ready.ok === true ? ready.value : getDefaultSandboxDir();
+      migrated = true;
+    }
+    if (!parsed.chatMessages) {
+      parsed.chatMessages = [];
+      migrated = true;
+    }
+    parsed.chatFiles = await listWorkspaceFiles(parsed.chatWorkspaceDir);
+
+    if (migrated) {
       await saveSnapshot(parsed);
     }
     return parsed;
@@ -313,6 +351,140 @@ export async function executeClosedLoop(
   }
 
   await refreshPreviews(snapshot, ports.workspace as LocalFsWorkspaceAdapter);
+  await saveSnapshot(snapshot);
+  return snapshot;
+}
+
+export async function setChatWorkspace(
+  snapshot: HarnessWorkspaceSnapshot,
+  workspaceDir: string,
+  verifyCommand?: string,
+  createIfMissing = false,
+): Promise<Result<HarnessWorkspaceSnapshot, HarnessError>> {
+  const dirRes = await ensureWorkspaceDirectory(workspaceDir, createIfMissing);
+  if (dirRes.ok === false) {
+    return {ok: false, error: dirRes.error};
+  }
+  snapshot.chatWorkspaceDir = dirRes.value;
+  if (typeof verifyCommand === 'string') {
+    snapshot.chatVerifyCommand = verifyCommand.trim();
+  }
+  snapshot.chatFiles = await listWorkspaceFiles(dirRes.value);
+  await saveSnapshot(snapshot);
+  return ok(snapshot);
+}
+
+export async function readChatWorkspaceFile(
+  snapshot: HarnessWorkspaceSnapshot,
+  relPath: string,
+): Promise<Result<string, HarnessError>> {
+  const dir = snapshot.chatWorkspaceDir ?? getDefaultSandboxDir();
+  return readWorkspaceFileNumbered(dir, relPath, 1, 300);
+}
+
+export async function verifyChatWorkspace(
+  snapshot: HarnessWorkspaceSnapshot,
+  verifyCommand?: string,
+): Promise<HarnessWorkspaceSnapshot> {
+  const dir = snapshot.chatWorkspaceDir ?? getDefaultSandboxDir();
+  const ready = await ensureWorkspaceDirectory(dir, dir === getDefaultSandboxDir());
+  const targetDir = ready.ok === true ? ready.value : dir;
+
+  if (typeof verifyCommand === 'string') {
+    snapshot.chatVerifyCommand = verifyCommand.trim();
+  }
+
+  const res = await runWorkspaceVerify(targetDir, snapshot.chatVerifyCommand);
+  const messages = snapshot.chatMessages ?? [];
+  messages.push({
+    id: `MSG-${Date.now()}`,
+    role: 'assistant',
+    content: `${res.passed ? '[PASS]' : '[FAIL]'} ${res.summary}\n\n${res.output}`,
+    workspaceDir: targetDir,
+    timestamp: new Date().toISOString(),
+    verifyPassed: res.passed,
+    actions: [
+      {
+        tool: 'run_verify',
+        target: snapshot.chatVerifyCommand || 'auto-verify',
+        ok: res.passed,
+        summary: res.summary,
+      },
+    ],
+  });
+  snapshot.chatMessages = messages;
+  snapshot.chatFiles = await listWorkspaceFiles(targetDir);
+  await saveSnapshot(snapshot);
+  return snapshot;
+}
+
+export async function sendChatMessage(
+  snapshot: HarnessWorkspaceSnapshot,
+  message: string,
+  tierOverride?: ModelTier,
+): Promise<Result<HarnessWorkspaceSnapshot, HarnessError>> {
+  const dir = snapshot.chatWorkspaceDir ?? getDefaultSandboxDir();
+  const dirRes = await ensureWorkspaceDirectory(dir, dir === getDefaultSandboxDir());
+  if (dirRes.ok === false) {
+    return {ok: false, error: dirRes.error};
+  }
+
+  const targetDir = dirRes.value;
+  const messages: ChatMessageEntry[] = [...(snapshot.chatMessages ?? [])];
+  const userEntry: ChatMessageEntry = {
+    id: `MSG-${Date.now()}-u`,
+    role: 'user',
+    content: message,
+    workspaceDir: targetDir,
+    timestamp: new Date().toISOString(),
+  };
+
+  const initialTier: ModelTier =
+    tierOverride ??
+    (snapshot.adapters.modelAdapter === 'deepseek-pro' ? 'pro' : 'flash');
+
+  const turnRes = await runWorkspaceChatTurn({
+    workspaceDir: targetDir,
+    userMessage: message,
+    initialTier,
+    verifyCommand: snapshot.chatVerifyCommand,
+    apiKey: process.env.DEEPSEEK_API_KEY ?? '',
+    baseUrl: process.env.DEEPSEEK_BASE_URL,
+    flashModel: process.env.DEEPSEEK_MODEL_FLASH,
+    proModel: process.env.DEEPSEEK_MODEL_PRO,
+  });
+
+  if (turnRes.ok === false) {
+    return err(turnRes.error);
+  }
+
+  const assistantEntry: ChatMessageEntry = {
+    id: `MSG-${Date.now()}-a`,
+    role: 'assistant',
+    content: turnRes.value.reply,
+    workspaceDir: targetDir,
+    timestamp: new Date().toISOString(),
+    modelTier: turnRes.value.modelTier,
+    frameTokens: turnRes.value.frameTokens,
+    budgetCeiling: turnRes.value.budgetCeiling,
+    cacheHitTokens: turnRes.value.cacheHitTokens,
+    staticHeadHash: turnRes.value.staticHeadHash,
+    actions: turnRes.value.actions,
+    verifyPassed: turnRes.value.verifyPassed,
+  };
+
+  messages.push(userEntry, assistantEntry);
+  snapshot.chatMessages = messages;
+  snapshot.lastFrame = turnRes.value.frame;
+  snapshot.chatFiles = await listWorkspaceFiles(targetDir);
+  await saveSnapshot(snapshot);
+  return ok(snapshot);
+}
+
+export async function clearChatHistory(
+  snapshot: HarnessWorkspaceSnapshot,
+): Promise<HarnessWorkspaceSnapshot> {
+  snapshot.chatMessages = [];
   await saveSnapshot(snapshot);
   return snapshot;
 }

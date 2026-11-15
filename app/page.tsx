@@ -2,6 +2,7 @@
 
 import {useEffect, useState} from 'react';
 import {ArchitecturePortsView} from '@/components/harness/ArchitecturePortsView';
+import {ChatWorkspaceView} from '@/components/harness/ChatWorkspaceView';
 import {CompilerInspectorView} from '@/components/harness/CompilerInspectorView';
 import {
   RequirementSidebar,
@@ -13,6 +14,7 @@ import {UI_COPY, type UiLocale} from '@/lib/harness/i18n';
 import type {
   AdapterProfile,
   HarnessWorkspaceSnapshot,
+  ModelTier,
 } from '@/lib/harness/types';
 
 export default function HomePage() {
@@ -29,7 +31,7 @@ export default function HomePage() {
     startLine: 32,
     endLine: 83,
   });
-  const [activeTab, setActiveTab] = useState<ActiveTab>('workbench');
+  const [activeTab, setActiveTab] = useState<ActiveTab>('chat');
   const [locale, setLocale] = useState<UiLocale>('en');
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -80,7 +82,7 @@ export default function HomePage() {
     };
   }, []);
 
-  async function postAction(payload: Record<string, unknown>) {
+  async function postAction(payload: Record<string, unknown>): Promise<boolean> {
     setBusy(true);
     setErrorMsg(null);
     try {
@@ -96,20 +98,46 @@ export default function HomePage() {
       };
       if (!res.ok || !data.ok || !data.snapshot) {
         setErrorMsg(data.error ?? 'Operation failed.');
-        return;
+        return false;
       }
       setSnapshot(data.snapshot);
+      return true;
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Request failed.');
+      return false;
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function readChatFile(filePath: string): Promise<string | null> {
+    setErrorMsg(null);
+    try {
+      const res = await fetch('/api/harness', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: 'read_chat_file', filePath}),
+      });
+      const data = (await res.json()) as {
+        ok: boolean;
+        fileContent?: string;
+        error?: string;
+      };
+      if (!res.ok || !data.ok) {
+        setErrorMsg(data.error ?? 'Failed to read file.');
+        return null;
+      }
+      return data.fileContent ?? '';
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to read file.');
+      return null;
     }
   }
 
   const allPassed = Boolean(
     snapshot &&
       snapshot.tasks.length > 0 &&
-      snapshot.tasks.every((t) => t.status === 'passed'),
+      snapshot.tasks.every((task) => task.status === 'passed'),
   );
 
   return (
@@ -145,6 +173,35 @@ export default function HomePage() {
             {t.loading}
           </div>
         </main>
+      ) : activeTab === 'chat' ? (
+        <ChatWorkspaceView
+          snapshot={snapshot}
+          locale={locale}
+          busy={busy}
+          onSetWorkspace={(workspaceDir, verifyCommand, createIfMissing) =>
+            void postAction({
+              action: 'set_chat_workspace',
+              workspaceDir,
+              verifyCommand,
+              createIfMissing,
+            })
+          }
+          onRunVerify={(verifyCommand) =>
+            void postAction({
+              action: 'verify_chat_workspace',
+              verifyCommand,
+            })
+          }
+          onSendMessage={(message: string, modelTier: ModelTier) =>
+            postAction({
+              action: 'chat_send',
+              message,
+              modelTier,
+            })
+          }
+          onClearChat={() => void postAction({action: 'clear_chat'})}
+          onReadFile={readChatFile}
+        />
       ) : (
         <div className="mx-auto flex max-w-[1440px] flex-col lg:flex-row">
           <RequirementSidebar

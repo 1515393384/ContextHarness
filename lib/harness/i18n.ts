@@ -2,6 +2,7 @@ export type UiLocale = 'en' | 'zh';
 
 export interface UiDictionary {
   nav: {
+    chat: string;
     workbench: string;
     compiler: string;
     architecture: string;
@@ -102,11 +103,42 @@ export interface UiDictionary {
     probeOptions: Record<string, {title: string; desc: string}>;
     modelOptions: Record<string, {title: string; desc: string}>;
   };
+  chat: {
+    sidebarTitle: string;
+    sidebarDesc: string;
+    dirLabel: string;
+    dirPlaceholder: string;
+    presetSandbox: string;
+    presetCurrent: string;
+    createMissingLabel: string;
+    applyDirBtn: string;
+    verifyCmdLabel: string;
+    verifyCmdPlaceholder: string;
+    runVerifyBtn: string;
+    filesTitle: string;
+    emptyFiles: string;
+    filePreviewTitle: string;
+    closePreview: string;
+    threadTitle: string;
+    clearBtn: string;
+    emptyThread: string;
+    gatewayReady: string;
+    gatewayUnset: string;
+    userLabel: string;
+    assistantLabel: string;
+    actionsTitle: string;
+    inputPlaceholder: string;
+    tierFlash: string;
+    tierPro: string;
+    sendBtn: string;
+    sendingBtn: string;
+  };
 }
 
 export const UI_COPY: Record<UiLocale, UiDictionary> = {
   en: {
     nav: {
+      chat: 'Workspace Chat',
       workbench: 'Workbench',
       compiler: '4-Slot Compiler',
       architecture: 'Ports & Adapters',
@@ -249,10 +281,44 @@ export const UI_COPY: Record<UiLocale, UiDictionary> = {
         },
       },
     },
+    chat: {
+      sidebarTitle: 'Target Directory & Verify',
+      sidebarDesc:
+        'Point the stateless 4-Slot agent at an isolated sandbox or any local directory so it never damages ContextHarness itself.',
+      dirLabel: 'Workspace Directory Path',
+      dirPlaceholder: './workspace-sandbox or E:\\path\\to\\project',
+      presetSandbox: 'Sandbox (./workspace-sandbox)',
+      presetCurrent: 'Current Dir (.)',
+      createMissingLabel: 'Create directory if missing',
+      applyDirBtn: 'Set Directory',
+      verifyCmdLabel: 'Verify Command (Optional)',
+      verifyCmdPlaceholder: 'Auto-detects *.test.ts & tsc if empty',
+      runVerifyBtn: 'Run Verify in Directory',
+      filesTitle: 'Files in Target Directory',
+      emptyFiles: 'Directory is currently empty. Ask the agent to create files.',
+      filePreviewTitle: 'File Preview',
+      closePreview: 'Close',
+      threadTitle: 'Stateless 4-Slot Agent Dialog',
+      clearBtn: 'Clear Chat',
+      emptyThread:
+        'Type any coding task below (e.g., "Create a rate-limiter module with unit tests and run verification"). Every micro-step executes within a bounded 4K-8K token frame inside the selected directory.',
+      gatewayReady: 'DEEPSEEK_API_KEY configured',
+      gatewayUnset: 'DEEPSEEK_API_KEY unset (directory verify still works)',
+      userLabel: 'You',
+      assistantLabel: 'ContextHarness Agent',
+      actionsTitle: 'Executed Micro-Steps',
+      inputPlaceholder:
+        'Ask the agent to create, edit, debug, or test code inside the target directory... (Enter to send, Shift+Enter for newline)',
+      tierFlash: 'Flash-1017',
+      tierPro: 'Pro (Reasoner)',
+      sendBtn: 'Send Task',
+      sendingBtn: 'Executing...',
+    },
   },
   zh: {
     nav: {
-      workbench: '工作台',
+      chat: '对话工作区',
+      workbench: '契约工作台',
       compiler: '4-Slot 上下文编译器',
       architecture: '端口与适配层',
       runLoop: '运行闭环',
@@ -390,6 +456,39 @@ export const UI_COPY: Record<UiLocale, UiDictionary> = {
           desc: '连续两轮相同错误哈希触发 DDI 熔断后，由 SWE-Router 自动升级接入。',
         },
       },
+    },
+    chat: {
+      sidebarTitle: '目标目录与校验命令',
+      sidebarDesc:
+        '将无状态 4-Slot Agent 指向隔离沙盒或任意本地目录，避免误改 ContextHarness 自身源码。',
+      dirLabel: '工作目录路径',
+      dirPlaceholder: './workspace-sandbox 或 E:\\你的测试目录',
+      presetSandbox: '安全沙盒 (./workspace-sandbox)',
+      presetCurrent: '当前目录 (.)',
+      createMissingLabel: '目录不存在时自动创建',
+      applyDirBtn: '切换工作目录',
+      verifyCmdLabel: '校验命令（可选）',
+      verifyCmdPlaceholder: '留空则自动检测 *.test.ts 与 tsc',
+      runVerifyBtn: '在当前目录运行校验',
+      filesTitle: '目标目录文件列表',
+      emptyFiles: '当前目录为空，可直接发对话指令让 Agent 创建文件并测试。',
+      filePreviewTitle: '文件预览',
+      closePreview: '关闭',
+      threadTitle: '无状态 4-Slot 对话执行窗口',
+      clearBtn: '清空对话',
+      emptyThread:
+        '在下方输入任意编程任务（例如：“在当前目录写一个令牌桶限流器并附带单元测试，跑通全部测试”）。每一步都会在 4K-8K 固定 Token 帧内操作目标目录。',
+      gatewayReady: 'DEEPSEEK_API_KEY 已配置',
+      gatewayUnset: 'DEEPSEEK_API_KEY 未配置（仍可执行目录校验与文件浏览）',
+      userLabel: '你',
+      assistantLabel: 'ContextHarness Agent',
+      actionsTitle: '执行微步记录',
+      inputPlaceholder:
+        '输入要在目标目录中创建、修改、排查或测试的任务...（Enter 发送，Shift+Enter 换行）',
+      tierFlash: 'Flash-1017',
+      tierPro: 'Pro (Reasoner)',
+      sendBtn: '发送执行',
+      sendingBtn: '执行中...',
     },
   },
 };

@@ -216,6 +216,28 @@ export interface AdapterProfile {
   modelAdapter: ModelAdapterKind;
 }
 
+export interface ChatStepAction {
+  tool: 'list_files' | 'read_slice' | 'write_file' | 'replace_lines' | 'run_verify';
+  target: string;
+  ok: boolean;
+  summary: string;
+}
+
+export interface ChatMessageEntry {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  workspaceDir: string;
+  timestamp: string;
+  modelTier?: ModelTier;
+  frameTokens?: number;
+  budgetCeiling?: number;
+  cacheHitTokens?: number;
+  staticHeadHash?: string;
+  actions?: ChatStepAction[];
+  verifyPassed?: boolean;
+}
+
 export interface HarnessWorkspaceSnapshot {
   spec: SpecDocument;
   tasks: AtomicTask[];
@@ -228,4 +250,8 @@ export interface HarnessWorkspaceSnapshot {
   adapters: AdapterProfile;
   deepseekConfigured: boolean;
   taskInitialSnapshots?: Record<string, string>;
+  chatWorkspaceDir?: string;
+  chatVerifyCommand?: string;
+  chatFiles?: string[];
+  chatMessages?: ChatMessageEntry[];
 }

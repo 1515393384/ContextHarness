@@ -2,7 +2,7 @@
 
 import {UI_COPY, type UiLocale} from '@/lib/harness/i18n';
 
-export type ActiveTab = 'workbench' | 'compiler' | 'architecture';
+export type ActiveTab = 'chat' | 'workbench' | 'compiler' | 'architecture';
 
 interface TopNavProps {
   activeTab: ActiveTab;
@@ -25,6 +25,7 @@ export function TopNav({
 }: TopNavProps) {
   const t = UI_COPY[locale].nav;
   const tabs: Array<{id: ActiveTab; label: string}> = [
+    {id: 'chat', label: t.chat},
     {id: 'workbench', label: t.workbench},
     {id: 'compiler', label: t.compiler},
     {id: 'architecture', label: t.architecture},
