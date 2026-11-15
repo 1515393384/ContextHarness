@@ -12,3 +12,5 @@ coverage/
 .vite/
 __pycache__/
 *.pyc
+*.tsbuildinfo
+.vercel/
