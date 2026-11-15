@@ -58,22 +58,28 @@ export class DeepSeekModelGateway implements ModelGatewayPort {
       'Respond strictly as JSON with shape: {"reasoningSummary": string, "patch": {"file": string, "startLine": number, "endLine": number, "expectedFirstLine": string, "newCode": string}}. Do NOT include line-number prefixes (like "32 | ") in newCode or expectedFirstLine, and ensure newCode completely replaces lines [startLine..endLine] with balanced braces.',
     ].join('\n\n');
 
+    const isReasoner = model.toLowerCase().includes('reasoner');
     try {
+      const requestBody: Record<string, unknown> = {
+        model,
+        max_tokens: 4096,
+        messages: [
+          {role: 'system', content: systemMessage},
+          {role: 'user', content: userMessage},
+        ],
+      };
+      if (!isReasoner) {
+        requestBody.temperature = 0.1;
+        requestBody.response_format = {type: 'json_object'};
+      }
+
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.apiKey}`,
         },
-        body: JSON.stringify({
-          model,
-          temperature: 0.1,
-          response_format: {type: 'json_object'},
-          messages: [
-            {role: 'system', content: systemMessage},
-            {role: 'user', content: userMessage},
-          ],
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -86,7 +92,7 @@ export class DeepSeekModelGateway implements ModelGatewayPort {
       }
 
       const data = (await response.json()) as {
-        choices?: Array<{message?: {content?: string}}>;
+        choices?: Array<{message?: {content?: string; reasoning_content?: string}}>;
         usage?: {
           prompt_tokens?: number;
           prompt_cache_hit_tokens?: number;
@@ -94,7 +100,9 @@ export class DeepSeekModelGateway implements ModelGatewayPort {
         };
       };
 
-      const rawContent = data.choices?.[0]?.message?.content;
+      const rawContent =
+        data.choices?.[0]?.message?.content ||
+        data.choices?.[0]?.message?.reasoning_content;
       if (!rawContent) {
         return err({
           code: 'MODEL_GATEWAY_ERROR',
@@ -102,7 +110,17 @@ export class DeepSeekModelGateway implements ModelGatewayPort {
         });
       }
 
-      const parsed = JSON.parse(rawContent) as {
+      const trimmed = rawContent.trim();
+      const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+      const candidate = fenceMatch?.[1]?.trim() ?? trimmed;
+      const firstBrace = candidate.indexOf('{');
+      const lastBrace = candidate.lastIndexOf('}');
+      const jsonStr =
+        firstBrace !== -1 && lastBrace > firstBrace
+          ? candidate.slice(firstBrace, lastBrace + 1)
+          : candidate;
+
+      const parsed = JSON.parse(jsonStr) as {
         reasoningSummary?: string;
         patch?: LinePatch;
       };

@@ -309,9 +309,70 @@ function buildChatStaticHead(tier: ModelTier): string {
   return [
     `[STATIC_CHAT_HARNESS_PREFIX v1 | tier=${tier}]`,
     'ROLE: Stateless Bounded-Context Workspace Agent. You operate strictly inside the active workspace directory using at most 4K-8K tokens per step.',
-    'RULES: (1) Read only needed slices via read_slice. (2) Create or edit files inside workspace via write_file or replace_lines (never include line-number prefixes like "12 | "). (3) Run run_verify after code edits when tests or types apply. (4) Call finish with a concise summary when done. (5) Output strictly valid JSON.',
+    'RULES: (1) Read only needed slices via read_slice. (2) Create or edit files inside workspace via write_file or replace_lines (never include line-number prefixes like "12 | "). (3) Run run_verify after code edits when tests or types apply. (4) Call finish with a concise summary when done. (5) Output ONLY raw JSON (no markdown fences, no prose).',
     `RESPONSE_JSON_SCHEMA: ${schema}`,
   ].join('\n');
+}
+
+function parseModelJsonObject<T>(raw: string): T | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  const tryParse = (candidate: string): T | null => {
+    try {
+      const val = JSON.parse(candidate) as unknown;
+      return val && typeof val === 'object' ? (val as T) : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const direct = tryParse(trimmed);
+  if (direct) return direct;
+
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenceMatch && fenceMatch[1]) {
+    const fenced = tryParse(fenceMatch[1].trim());
+    if (fenced) return fenced;
+  }
+
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const ch = trimmed[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === '{') {
+      if (depth === 0) start = i;
+      depth += 1;
+    } else if (ch === '}' && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start !== -1) {
+        const balanced = tryParse(trimmed.slice(start, i + 1));
+        if (balanced) return balanced;
+        start = -1;
+      }
+    }
+  }
+
+  const first = trimmed.indexOf('{');
+  const last = trimmed.lastIndexOf('}');
+  if (first !== -1 && last > first) {
+    return tryParse(trimmed.slice(first, last + 1));
+  }
+  return null;
 }
 
 async function buildWorkspaceSkeleton(rootDir: string, files: string[]): Promise<string> {
@@ -491,31 +552,38 @@ export async function runWorkspaceChatTurn(
 
     const model = activeTier === 'pro' ? proModel : flashModel;
     const cleanBase = baseUrl.replace(/\/$/, '');
+    const isReasoner = model.toLowerCase().includes('reasoner');
 
     let rawContent = '';
+    let finishReason = '';
     try {
+      const requestBody: Record<string, unknown> = {
+        model,
+        max_tokens: 4096,
+        messages: [
+          {role: 'system', content: frame.slot1StaticHead.content},
+          {
+            role: 'user',
+            content: [
+              frame.slot2ContractAnchors.content,
+              frame.slot3SurgicalSlice.content,
+              frame.slot4VerifyFeedback.content,
+            ].join('\n\n'),
+          },
+        ],
+      };
+      if (!isReasoner) {
+        requestBody.temperature = 0.1;
+        requestBody.response_format = {type: 'json_object'};
+      }
+
       const response = await fetch(`${cleanBase}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({
-          model,
-          temperature: 0.1,
-          response_format: {type: 'json_object'},
-          messages: [
-            {role: 'system', content: frame.slot1StaticHead.content},
-            {
-              role: 'user',
-              content: [
-                frame.slot2ContractAnchors.content,
-                frame.slot3SurgicalSlice.content,
-                frame.slot4VerifyFeedback.content,
-              ].join('\n\n'),
-            },
-          ],
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -528,11 +596,18 @@ export async function runWorkspaceChatTurn(
       }
 
       const data = (await response.json()) as {
-        choices?: Array<{message?: {content?: string}}>;
+        choices?: Array<{
+          finish_reason?: string;
+          message?: {content?: string; reasoning_content?: string};
+        }>;
         usage?: {prompt_cache_hit_tokens?: number};
       };
       totalCacheHits += data.usage?.prompt_cache_hit_tokens ?? 0;
-      rawContent = data.choices?.[0]?.message?.content ?? '';
+      finishReason = data.choices?.[0]?.finish_reason ?? '';
+      rawContent =
+        data.choices?.[0]?.message?.content ||
+        data.choices?.[0]?.message?.reasoning_content ||
+        '';
     } catch (error) {
       return err({
         code: 'MODEL_GATEWAY_ERROR',
@@ -543,20 +618,24 @@ export async function runWorkspaceChatTurn(
       });
     }
 
-    let parsed: {reasoning?: string; action?: ParsedChatAction};
-    try {
-      parsed = JSON.parse(rawContent) as {
-        reasoning?: string;
-        action?: ParsedChatAction;
-      };
-    } catch {
-      latestFeedback = `[STEP_ERROR] Model returned invalid JSON. Respond strictly with valid JSON matching RESPONSE_JSON_SCHEMA.`;
+    const parsed = parseModelJsonObject<
+      {reasoning?: string; action?: ParsedChatAction} & Partial<ParsedChatAction>
+    >(rawContent);
+    if (!parsed) {
+      const preview = rawContent.slice(0, 140).replace(/\s+/g, ' ');
+      latestFeedback = `[STEP_ERROR finish=${finishReason || 'unknown'}] Invalid JSON output (${preview || 'empty'}). Output ONLY one raw JSON object matching RESPONSE_JSON_SCHEMA.`;
       continue;
     }
 
-    const act = parsed.action;
+    const act: ParsedChatAction | undefined =
+      parsed.action && parsed.action.tool
+        ? parsed.action
+        : parsed.tool
+          ? (parsed as ParsedChatAction)
+          : undefined;
+
     if (!act || !act.tool) {
-      latestFeedback = `[STEP_ERROR] Missing action.tool in JSON response.`;
+      latestFeedback = `[STEP_ERROR] Missing action.tool in JSON response. Received keys: ${Object.keys(parsed).join(', ')}`;
       continue;
     }
 
