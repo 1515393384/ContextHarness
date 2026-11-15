@@ -9,6 +9,7 @@ import {
 } from '@/components/harness/RequirementSidebar';
 import {TopNav, type ActiveTab} from '@/components/harness/TopNav';
 import {WorkbenchView} from '@/components/harness/WorkbenchView';
+import {UI_COPY, type UiLocale} from '@/lib/harness/i18n';
 import type {
   AdapterProfile,
   HarnessWorkspaceSnapshot,
@@ -29,8 +30,10 @@ export default function HomePage() {
     endLine: 83,
   });
   const [activeTab, setActiveTab] = useState<ActiveTab>('workbench');
+  const [locale, setLocale] = useState<UiLocale>('en');
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const t = UI_COPY[locale];
 
   useEffect(() => {
     let mounted = true;
@@ -117,6 +120,8 @@ export default function HomePage() {
         onRunLoop={() => postAction({action: 'run_loop'})}
         busy={busy || !snapshot}
         allPassed={allPassed}
+        locale={locale}
+        onToggleLocale={() => setLocale((prev) => (prev === 'en' ? 'zh' : 'en'))}
       />
 
       {errorMsg && (
@@ -128,7 +133,7 @@ export default function HomePage() {
               onClick={() => setErrorMsg(null)}
               className="font-medium text-red-900 underline whitespace-nowrap"
             >
-              Dismiss
+              {t.dismiss}
             </button>
           </div>
         </div>
@@ -137,7 +142,7 @@ export default function HomePage() {
       {!snapshot ? (
         <main className="mx-auto max-w-[1440px] px-6 py-8">
           <div className="rounded-lg border border-slate-200 bg-white p-8 text-sm text-slate-500">
-            Loading ContextHarness workspace...
+            {t.loading}
           </div>
         </main>
       ) : (
@@ -165,6 +170,7 @@ export default function HomePage() {
               postAction({action: 'select_task', taskId})
             }
             busy={busy}
+            locale={locale}
           />
 
           <main className="min-w-0 flex-1 p-6">
@@ -177,11 +183,12 @@ export default function HomePage() {
                 onReset={() => postAction({action: 'reset'})}
                 onOpenCompiler={() => setActiveTab('compiler')}
                 busy={busy}
+                locale={locale}
               />
             )}
 
             {activeTab === 'compiler' && (
-              <CompilerInspectorView frame={snapshot.lastFrame} />
+              <CompilerInspectorView frame={snapshot.lastFrame} locale={locale} />
             )}
 
             {activeTab === 'architecture' && (
@@ -191,6 +198,7 @@ export default function HomePage() {
                   postAction({action: 'update_adapters', adapters})
                 }
                 busy={busy}
+                locale={locale}
               />
             )}
           </main>

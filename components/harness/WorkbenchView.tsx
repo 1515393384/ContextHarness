@@ -1,5 +1,6 @@
 'use client';
 
+import {UI_COPY, type UiLocale} from '@/lib/harness/i18n';
 import type {HarnessWorkspaceSnapshot} from '@/lib/harness/types';
 
 interface WorkbenchViewProps {
@@ -10,6 +11,7 @@ interface WorkbenchViewProps {
   onReset: () => void;
   onOpenCompiler: () => void;
   busy: boolean;
+  locale: UiLocale;
 }
 
 function decisionLabel(decision: string): {text: string; cls: string} {
@@ -37,7 +39,9 @@ export function WorkbenchView({
   onReset,
   onOpenCompiler,
   busy,
+  locale,
 }: WorkbenchViewProps) {
+  const t = UI_COPY[locale].workbench;
   const {
     spec,
     tasks,
@@ -48,9 +52,9 @@ export function WorkbenchView({
     lastFrame,
     deepseekConfigured,
   } = snapshot;
-  const activeTask = tasks.find((t) => t.id === activeTaskId) ?? tasks[0];
+  const activeTask = tasks.find((task) => task.id === activeTaskId) ?? tasks[0];
 
-  const passedCount = tasks.filter((t) => t.status === 'passed').length;
+  const passedCount = tasks.filter((task) => task.status === 'passed').length;
   const allPassed = passedCount === tasks.length && tasks.length > 0;
 
   return (
@@ -64,17 +68,19 @@ export function WorkbenchView({
             <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-slate-500">
               <span className="font-mono">{spec.id}</span>
               <span aria-hidden="true">·</span>
-              <span>Language: {spec.targetLanguage}</span>
+              <span>
+                {t.languagePrefix}: {spec.targetLanguage}
+              </span>
               <span aria-hidden="true">·</span>
               <span className="font-mono">
-                Writable: {activeTask.writeLock.editableRange.file}:
+                {t.writablePrefix}: {activeTask.writeLock.editableRange.file}:
                 {activeTask.writeLock.editableRange.startLine}-
                 {activeTask.writeLock.editableRange.endLine}
               </span>
               <span aria-hidden="true">·</span>
               <span>
-                Read-Only Lock:{' '}
-                {activeTask.writeLock.readOnlyFiles.join(', ') || 'none'}
+                {t.readOnlyLockPrefix}:{' '}
+                {activeTask.writeLock.readOnlyFiles.join(', ') || t.noneText}
               </span>
             </div>
           </div>
@@ -86,7 +92,7 @@ export function WorkbenchView({
               disabled={busy}
               className="rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap"
             >
-              Compile 4-Slot Frame
+              {t.compileFrameBtn}
             </button>
             <button
               type="button"
@@ -94,7 +100,7 @@ export function WorkbenchView({
               disabled={busy}
               className="rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap"
             >
-              Run Local Verify
+              {t.verifyBtn}
             </button>
             <button
               type="button"
@@ -102,14 +108,14 @@ export function WorkbenchView({
               disabled={busy || allPassed}
               className="rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300 whitespace-nowrap"
             >
-              Step Active Task
+              {t.stepBtn}
             </button>
             <button
               type="button"
               onClick={onOpenCompiler}
               className="rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap"
             >
-              Inspect Frame
+              {t.inspectBtn}
             </button>
             <button
               type="button"
@@ -117,7 +123,7 @@ export function WorkbenchView({
               disabled={busy}
               className="rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap"
             >
-              Reset
+              {t.resetBtn}
             </button>
           </div>
         </div>
@@ -125,7 +131,7 @@ export function WorkbenchView({
         <div className="mt-5 grid gap-5 border-t border-slate-100 pt-5 md:grid-cols-2">
           <div>
             <h2 className="text-xs font-semibold text-slate-700">
-              Contract & Verification Mapping
+              {t.mappingTitle}
             </h2>
             <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded-md border border-slate-200 bg-slate-50 p-3 font-mono text-xs leading-relaxed text-slate-800">
               {spec.inputOutputSummary}
@@ -133,7 +139,7 @@ export function WorkbenchView({
           </div>
           <div>
             <h2 className="text-xs font-semibold text-slate-700">
-              Acceptance Criteria
+              {t.criteriaTitle}
             </h2>
             <ul className="mt-2 space-y-1.5 text-xs leading-relaxed text-slate-600">
               {spec.acceptanceCriteria.map((item) => (
@@ -145,43 +151,42 @@ export function WorkbenchView({
 
         <div className="mt-4 flex flex-wrap items-center justify-between gap-4 border-t border-slate-100 pt-4 text-xs text-slate-600">
           <span>
-            Gateway Status:{' '}
+            {t.gatewayStatusLabel}:{' '}
             <strong className="font-mono text-slate-900">
-              {deepseekConfigured
-                ? 'DEEPSEEK_API_KEY configured (live inference ready)'
-                : 'DEEPSEEK_API_KEY unset (local compile & verify active)'}
+              {deepseekConfigured ? t.gatewayReady : t.gatewayUnset}
             </strong>
           </span>
           <span className="font-mono text-slate-500 tabular-nums">
-            Active: {activeTask.id} · Adapter: {snapshot.adapters.modelAdapter}
+            {t.activeLabel}: {activeTask.id} · {t.adapterLabel}:{' '}
+            {snapshot.adapters.modelAdapter}
           </span>
         </div>
       </section>
 
       <section
-        aria-label="Attention Budget Metrics"
+        aria-label={t.roleCeiling}
         className="grid grid-cols-2 gap-4 md:grid-cols-4"
       >
         <div className="rounded-lg border border-slate-200 bg-white p-4">
-          <div className="text-xs text-slate-500">Role Token Ceiling</div>
+          <div className="text-xs text-slate-500">{t.roleCeiling}</div>
           <div className="mt-1 font-mono text-xl font-semibold text-slate-900 tabular-nums">
             {lastFrame ? `${lastFrame.budgetCeiling.toLocaleString()} tok` : '4,000 tok'}
           </div>
         </div>
         <div className="rounded-lg border border-slate-200 bg-white p-4">
-          <div className="text-xs text-slate-500">Compiled Frame Tokens</div>
+          <div className="text-xs text-slate-500">{t.compiledTokens}</div>
           <div className="mt-1 font-mono text-xl font-semibold text-slate-900 tabular-nums">
             {lastFrame ? `${lastFrame.totalTokens.toLocaleString()} tok` : '0 tok'}
           </div>
         </div>
         <div className="rounded-lg border border-slate-200 bg-white p-4">
-          <div className="text-xs text-slate-500">Static Prefix Hash</div>
+          <div className="text-xs text-slate-500">{t.staticHash}</div>
           <div className="mt-1 font-mono text-xl font-semibold text-slate-900 tabular-nums">
             {lastFrame ? lastFrame.staticHeadHash : '--------'}
           </div>
         </div>
         <div className="rounded-lg border border-slate-200 bg-white p-4">
-          <div className="text-xs text-slate-500">DAG Pass Progress</div>
+          <div className="text-xs text-slate-500">{t.dagProgress}</div>
           <div className="mt-1 font-mono text-xl font-semibold text-slate-900 tabular-nums">
             {passedCount} / {tasks.length}
           </div>
@@ -190,31 +195,31 @@ export function WorkbenchView({
 
       <section className="rounded-lg border border-slate-200 bg-white">
         <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
-          <h2 className="text-sm font-semibold text-slate-900">
-            Execution & Verification Log
-          </h2>
+          <h2 className="text-sm font-semibold text-slate-900">{t.logTitle}</h2>
           <span className="font-mono text-xs text-slate-500 tabular-nums">
-            {traces.length} rounds
+            {traces.length} {t.roundsSuffix}
           </span>
         </div>
 
         {traces.length === 0 ? (
           <div className="px-6 py-10 text-center text-sm text-slate-500">
-            No execution rounds recorded yet. Run Compile 4-Slot Frame, Run Local Verify, or Step Active Task.
+            {t.emptyLog}
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full border-collapse text-left text-xs">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
-                  <th className="px-4 py-2.5 font-medium">Round</th>
-                  <th className="px-4 py-2.5 font-medium">Task & Role</th>
-                  <th className="px-4 py-2.5 font-medium">Tier</th>
-                  <th className="px-4 py-2.5 font-medium text-right">Tokens / Cap</th>
-                  <th className="px-4 py-2.5 font-medium">Prefix Cache</th>
-                  <th className="px-4 py-2.5 font-medium">Error Hash</th>
-                  <th className="px-4 py-2.5 font-medium">DDI Decision</th>
-                  <th className="px-4 py-2.5 font-medium">Summary</th>
+                  <th className="px-4 py-2.5 font-medium">{t.colRound}</th>
+                  <th className="px-4 py-2.5 font-medium">{t.colTaskRole}</th>
+                  <th className="px-4 py-2.5 font-medium">{t.colTier}</th>
+                  <th className="px-4 py-2.5 font-medium text-right">
+                    {t.colTokensCap}
+                  </th>
+                  <th className="px-4 py-2.5 font-medium">{t.colPrefixCache}</th>
+                  <th className="px-4 py-2.5 font-medium">{t.colErrorHash}</th>
+                  <th className="px-4 py-2.5 font-medium">{t.colDdiDecision}</th>
+                  <th className="px-4 py-2.5 font-medium">{t.colSummary}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -237,7 +242,7 @@ export function WorkbenchView({
                         {tr.budgetCeiling.toLocaleString()}
                       </td>
                       <td className="px-4 py-2.5 text-slate-700">
-                        {tr.cacheHit ? 'Hit' : 'Cold'}
+                        {tr.cacheHit ? t.cacheHit : t.cacheCold}
                       </td>
                       <td className="px-4 py-2.5 font-mono text-slate-600 tabular-nums">
                         {tr.errorHash ?? 'PASS'}
@@ -264,7 +269,7 @@ export function WorkbenchView({
               {activeTask.targetFile}
             </h3>
             <span className="text-xs text-slate-500">
-              Writable lines {activeTask.writeLock.editableRange.startLine}-
+              {t.writableLines} {activeTask.writeLock.editableRange.startLine}-
               {activeTask.writeLock.editableRange.endLine}
             </span>
           </div>
@@ -278,9 +283,7 @@ export function WorkbenchView({
             <h3 className="font-mono text-xs font-semibold text-slate-900">
               {activeTask.testFile}
             </h3>
-            <span className="text-xs text-slate-500">
-              Read-only locked assertions
-            </span>
+            <span className="text-xs text-slate-500">{t.readOnlyAssertions}</span>
           </div>
           <pre className="max-h-[300px] overflow-auto p-4 font-mono text-xs leading-relaxed text-slate-800">
             {testFilePreview}

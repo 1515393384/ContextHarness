@@ -1,5 +1,6 @@
 'use client';
 
+import {UI_COPY, type UiLocale} from '@/lib/harness/i18n';
 import type {AtomicTask, SpecDocument, TargetLanguage} from '@/lib/harness/types';
 
 export interface PlanFormValues {
@@ -22,21 +23,26 @@ interface RequirementSidebarProps {
   activeTaskId: string;
   onSelectTask: (taskId: string) => void;
   busy: boolean;
+  locale: UiLocale;
 }
 
-function formatStatusText(status: AtomicTask['status']): {
+function formatStatusText(
+  status: AtomicTask['status'],
+  locale: UiLocale,
+): {
   text: string;
   colorClass: string;
 } {
+  const s = UI_COPY[locale].sidebar;
   switch (status) {
     case 'passed':
-      return {text: 'Passed', colorClass: 'text-emerald-700'};
+      return {text: s.statusPassed, colorClass: 'text-emerald-700'};
     case 'in_progress':
-      return {text: 'Debugging', colorClass: 'text-amber-700'};
+      return {text: s.statusDebugging, colorClass: 'text-amber-700'};
     case 'halted':
-      return {text: 'Halted', colorClass: 'text-red-700'};
+      return {text: s.statusHalted, colorClass: 'text-red-700'};
     default:
-      return {text: 'Pending', colorClass: 'text-slate-500'};
+      return {text: s.statusPending, colorClass: 'text-slate-500'};
   }
 }
 
@@ -49,15 +55,17 @@ export function RequirementSidebar({
   activeTaskId,
   onSelectTask,
   busy,
+  locale,
 }: RequirementSidebarProps) {
+  const t = UI_COPY[locale].sidebar;
   return (
     <aside className="w-full shrink-0 border-b border-slate-200 bg-white lg:w-[320px] lg:border-b-0 lg:border-r">
       <div className="p-5">
         <h2 className="text-base font-semibold text-slate-900">
-          Requirement Intake
+          {t.intakeTitle}
         </h2>
         <p className="mt-1 text-xs leading-relaxed text-slate-600">
-          Bind a requirement to an exact file slice, contract anchor, and test suite.
+          {t.intakeDesc}
         </p>
 
         <form
@@ -72,14 +80,14 @@ export function RequirementSidebar({
               htmlFor="requirement-prompt"
               className="block text-xs font-medium text-slate-700"
             >
-              Requirement Prompt
+              {t.promptLabel}
             </label>
             <textarea
               id="requirement-prompt"
               rows={3}
               value={form.prompt}
               onChange={(e) => onChangeForm({prompt: e.target.value})}
-              placeholder="Describe the target behavior and invariants..."
+              placeholder={t.promptPlaceholder}
               className="mt-1 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:bg-white focus:outline-none"
             />
           </div>
@@ -90,7 +98,7 @@ export function RequirementSidebar({
                 htmlFor="target-language"
                 className="block text-xs font-medium text-slate-700"
               >
-                Language
+                {t.languageLabel}
               </label>
               <select
                 id="target-language"
@@ -113,7 +121,7 @@ export function RequirementSidebar({
                 htmlFor="target-symbol"
                 className="block text-xs font-medium text-slate-700"
               >
-                Target Symbol
+                {t.symbolLabel}
               </label>
               <input
                 id="target-symbol"
@@ -130,7 +138,7 @@ export function RequirementSidebar({
               htmlFor="target-file"
               className="block text-xs font-medium text-slate-700"
             >
-              Editable Implementation File
+              {t.targetFileLabel}
             </label>
             <input
               id="target-file"
@@ -147,7 +155,7 @@ export function RequirementSidebar({
                 htmlFor="start-line"
                 className="block text-xs font-medium text-slate-700"
               >
-                Start Line
+                {t.startLineLabel}
               </label>
               <input
                 id="start-line"
@@ -165,7 +173,7 @@ export function RequirementSidebar({
                 htmlFor="end-line"
                 className="block text-xs font-medium text-slate-700"
               >
-                End Line
+                {t.endLineLabel}
               </label>
               <input
                 id="end-line"
@@ -185,7 +193,7 @@ export function RequirementSidebar({
               htmlFor="contract-file"
               className="block text-xs font-medium text-slate-700"
             >
-              Read-Only Contract File
+              {t.contractFileLabel}
             </label>
             <input
               id="contract-file"
@@ -201,7 +209,7 @@ export function RequirementSidebar({
               htmlFor="test-file"
               className="block text-xs font-medium text-slate-700"
             >
-              Read-Only Test File
+              {t.testFileLabel}
             </label>
             <input
               id="test-file"
@@ -217,7 +225,7 @@ export function RequirementSidebar({
             disabled={busy || !form.prompt.trim()}
             className="w-full rounded-lg border border-slate-900 bg-white px-4 py-2 text-xs font-semibold text-slate-900 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 whitespace-nowrap"
           >
-            Build Contract & Task DAG
+            {t.buildDagBtn}
           </button>
         </form>
       </div>
@@ -225,7 +233,7 @@ export function RequirementSidebar({
       <div className="border-t border-slate-200 p-5">
         <div className="flex items-baseline justify-between gap-2">
           <h3 className="text-sm font-semibold text-slate-900">
-            Atomic Task DAG
+            {t.dagTitle}
           </h3>
           <span className="font-mono text-xs text-slate-500 tabular-nums">
             {tasks.filter((t) => t.status === 'passed').length}/{tasks.length}
@@ -238,7 +246,7 @@ export function RequirementSidebar({
         <ul className="mt-3 divide-y divide-slate-100 border-t border-slate-100">
           {tasks.map((task) => {
             const isSelected = task.id === activeTaskId;
-            const st = formatStatusText(task.status);
+            const st = formatStatusText(task.status, locale);
             return (
               <li key={task.id}>
                 <button
@@ -262,7 +270,9 @@ export function RequirementSidebar({
                   <div className="mt-1 flex items-center gap-2 font-mono text-[11px] text-slate-500 tabular-nums">
                     <span>{task.activeModelTier === 'pro' ? 'Pro' : 'Flash-1017'}</span>
                     <span aria-hidden="true">·</span>
-                    <span>Attempts {task.attempts}</span>
+                    <span>
+                      {t.attemptsLabel} {task.attempts}
+                    </span>
                   </div>
                 </button>
               </li>

@@ -1,5 +1,7 @@
 'use client';
 
+import {UI_COPY, type UiLocale} from '@/lib/harness/i18n';
+
 export type ActiveTab = 'workbench' | 'compiler' | 'architecture';
 
 interface TopNavProps {
@@ -8,6 +10,8 @@ interface TopNavProps {
   onRunLoop: () => void;
   busy: boolean;
   allPassed: boolean;
+  locale: UiLocale;
+  onToggleLocale: () => void;
 }
 
 export function TopNav({
@@ -16,11 +20,14 @@ export function TopNav({
   onRunLoop,
   busy,
   allPassed,
+  locale,
+  onToggleLocale,
 }: TopNavProps) {
+  const t = UI_COPY[locale].nav;
   const tabs: Array<{id: ActiveTab; label: string}> = [
-    {id: 'workbench', label: 'Workbench'},
-    {id: 'compiler', label: '4-Slot Compiler'},
-    {id: 'architecture', label: 'Ports & Adapters'},
+    {id: 'workbench', label: t.workbench},
+    {id: 'compiler', label: t.compiler},
+    {id: 'architecture', label: t.architecture},
   ];
 
   return (
@@ -54,14 +61,22 @@ export function TopNav({
           })}
         </nav>
 
-        <div className="flex items-center shrink-0">
+        <div className="flex items-center gap-2.5 shrink-0">
+          <button
+            type="button"
+            onClick={onToggleLocale}
+            aria-label={locale === 'en' ? 'Switch UI to Chinese' : 'Switch UI to English'}
+            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+          >
+            {t.switchLabel}
+          </button>
           <button
             type="button"
             onClick={onRunLoop}
             disabled={busy || allPassed}
             className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300 whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
           >
-            {busy ? 'Running...' : allPassed ? 'All Tasks Passed' : 'Run Closed Loop'}
+            {busy ? t.running : allPassed ? t.allPassed : t.runLoop}
           </button>
         </div>
       </div>
