@@ -1,5 +1,5 @@
 import {exec, execFile} from 'node:child_process';
-import {promises as fs} from 'node:fs';
+import {promises as fs, type Dirent} from 'node:fs';
 import path from 'node:path';
 import {promisify} from 'node:util';
 import {
@@ -12,6 +12,9 @@ import {
   type ModelTier,
   type Result,
   type SlotFrame,
+  type StepDebugTrace,
+  type ToolRegressionItem,
+  type ToolRegressionReport,
 } from '../types';
 import {computeStableHash, truncateToTokenBudget} from './token-budget';
 
@@ -257,7 +260,7 @@ export async function listWorkspaceFiles(
 
   async function walk(currentDir: string): Promise<void> {
     if (files.length >= maxFiles) return;
-    let entries;
+    let entries: Dirent[];
     try {
       entries = await fs.readdir(currentDir, {withFileTypes: true});
     } catch {
@@ -312,7 +315,7 @@ export async function listDirectoryEntries(
 
   async function walk(dir: string, depth: number): Promise<void> {
     if (out.length >= 60 || depth > clampedDepth) return;
-    let entries;
+    let entries: Dirent[];
     try {
       entries = await fs.readdir(dir, {withFileTypes: true});
     } catch {
@@ -925,6 +928,7 @@ export interface WorkspaceChatTurnInput {
   maxSteps?: number;
   activeContext?: string;
   externalDiagnostics?: string;
+  recentTurnsSummary?: string;
   onEvent?: (event: HarnessStreamEvent) => void;
 }
 
@@ -932,6 +936,7 @@ export interface WorkspaceChatTurnOutput {
   turnId: string;
   reply: string;
   actions: ChatStepAction[];
+  stepTraces: StepDebugTrace[];
   modifiedFiles: string[];
   frame: SlotFrame;
   verifyPassed?: boolean;
@@ -1106,7 +1111,9 @@ function buildSlot3WithLru(params: {
   userMessage: string;
   workspaceDir: string;
   activeContext?: string;
+  recentTurnsSummary?: string;
   modifiedFiles: string[];
+  stepLedger: string[];
   failedNotes: string[];
   openSlices: Map<string, OpenSliceEntry>;
   maxTokens: number;
@@ -1115,12 +1122,23 @@ function buildSlot3WithLru(params: {
     `[USER_REQUEST]\n${params.userMessage}`,
     `[WORKSPACE_DIR] ${params.workspaceDir}`,
   ];
+  if (params.recentTurnsSummary?.trim()) {
+    headerParts.push(`[RECENT_TURNS]\n${params.recentTurnsSummary.trim()}`);
+  }
   if (params.activeContext?.trim()) {
     headerParts.push(`[ACTIVE_EDITOR_CONTEXT]\n${params.activeContext.trim()}`);
   }
-  if (params.modifiedFiles.length > 0 || params.failedNotes.length > 0) {
+  if (
+    params.stepLedger.length > 0 ||
+    params.modifiedFiles.length > 0 ||
+    params.failedNotes.length > 0
+  ) {
+    const ledgerBlock =
+      params.stepLedger.length > 0
+        ? `\nExecuted steps:\n${params.stepLedger.slice(-10).join('\n')}`
+        : '';
     headerParts.push(
-      `[TURN_STATE]\nModified: ${params.modifiedFiles.join(', ') || 'none'}\nRecent errors: ${params.failedNotes.slice(-2).join(' | ') || 'none'}`,
+      `[TURN_STATE]\nModified: ${params.modifiedFiles.join(', ') || 'none'}\nRecent errors: ${params.failedNotes.slice(-2).join(' | ') || 'none'}${ledgerBlock}`,
     );
   }
 
@@ -1152,6 +1170,28 @@ function buildSlot3WithLru(params: {
   return truncateToTokenBudget(currentText, params.maxTokens);
 }
 
+export function formatRecentTurnsSummary(
+  messages: Array<{
+    role: 'user' | 'assistant';
+    content: string;
+    modifiedFiles?: string[];
+  }>,
+  maxMessages = 6,
+): string | undefined {
+  if (!messages || messages.length === 0) return undefined;
+  const recent = messages.slice(-maxMessages);
+  const lines = recent.map((m) => {
+    const tag = m.role === 'user' ? 'User' : 'Agent';
+    const brief = m.content.replace(/\s+/g, ' ').trim().slice(0, 140);
+    const mod =
+      m.modifiedFiles && m.modifiedFiles.length > 0
+        ? ` [modified: ${m.modifiedFiles.join(', ')}]`
+        : '';
+    return `- ${tag}: ${brief}${mod}`;
+  });
+  return lines.join('\n');
+}
+
 export async function runWorkspaceChatTurn(
   input: WorkspaceChatTurnInput,
 ): Promise<Result<WorkspaceChatTurnOutput, HarnessError>> {
@@ -1166,6 +1206,7 @@ export async function runWorkspaceChatTurn(
     maxSteps = 14,
     activeContext,
     externalDiagnostics,
+    recentTurnsSummary,
     onEvent,
   } = input;
 
@@ -1186,16 +1227,19 @@ export async function runWorkspaceChatTurn(
 
   let activeTier: ModelTier = input.initialTier;
   const actions: ChatStepAction[] = [];
+  const stepTraces: StepDebugTrace[] = [];
+  const stepLedger: string[] = [];
   const modifiedFiles: string[] = [];
   const failedNotes: string[] = [];
   const priorityFiles: string[] = [];
   const openSlices = new Map<string, OpenSliceEntry>();
+  const toolSigCounts = new Map<string, number>();
   let latestFeedback = externalDiagnostics?.trim()
     ? `[STATUS] Turn start.\n[IDE_DIAGNOSTICS]\n${externalDiagnostics.trim()}`
     : '[STATUS] Clean turn start. 0 prior tool steps.';
   let lastErrorHash: string | null = null;
   let errorRepeatCount = 0;
-  let lastToolSig: string | null = null;
+  let loopGuardHits = 0;
   let lastVerifyPassed: boolean | undefined;
   let totalCacheHits = 0;
   let lastFrame: SlotFrame | null = null;
@@ -1234,7 +1278,9 @@ export async function runWorkspaceChatTurn(
       userMessage,
       workspaceDir,
       activeContext,
+      recentTurnsSummary,
       modifiedFiles,
+      stepLedger,
       failedNotes,
       openSlices,
       maxTokens: 2500,
@@ -1300,6 +1346,8 @@ export async function runWorkspaceChatTurn(
       cacheHitTokens: totalCacheHits,
     });
 
+    const stepStartedAt = Date.now();
+    const stepTier = activeTier;
     const model = activeTier === 'pro' ? proModel : flashModel;
     const modelRes = await callModelStreaming({
       baseUrl,
@@ -1322,6 +1370,27 @@ export async function runWorkspaceChatTurn(
     const {rawContent, finishReason, cacheHitTokens} = modelRes.value;
     totalCacheHits += cacheHitTokens;
 
+    const recordStepTrace = (
+      parsedReasoning: string | undefined,
+      parsedTool: string | undefined,
+      toolFeedback: string,
+    ) => {
+      const trace: StepDebugTrace = {
+        step,
+        modelTier: stepTier,
+        durationMs: Math.max(1, Date.now() - stepStartedAt),
+        finishReason: finishReason || 'stop',
+        cacheHitTokens,
+        frame,
+        rawModelOutput: rawContent,
+        parsedReasoning,
+        parsedTool,
+        toolFeedback,
+      };
+      stepTraces.push(trace);
+      onEvent?.({type: 'step_trace', trace});
+    };
+
     const parsed = parseModelJsonObject<
       {reasoning?: string; action?: ParsedChatAction} & Partial<ParsedChatAction>
     >(rawContent);
@@ -1331,6 +1400,7 @@ export async function runWorkspaceChatTurn(
       latestFeedback = msg;
       failedNotes.push(msg.slice(0, 100));
       onEvent?.({type: 'step_error', step, message: msg});
+      recordStepTrace(undefined, 'invalid_json', msg);
       continue;
     }
 
@@ -1346,6 +1416,7 @@ export async function runWorkspaceChatTurn(
       latestFeedback = msg;
       failedNotes.push(msg);
       onEvent?.({type: 'step_error', step, message: msg});
+      recordStepTrace(parsed.reasoning, 'missing_tool', msg);
       continue;
     }
 
@@ -1354,22 +1425,41 @@ export async function runWorkspaceChatTurn(
         act.reply?.trim() ||
         parsed.reasoning?.trim() ||
         'Completed workspace operations.';
+      recordStepTrace(parsed.reasoning, 'finish', `[FINISH] ${finalReply}`);
       break;
     }
 
+    const payloadDigest =
+      act.tool === 'write_file'
+        ? computeStableHash(act.content ?? '')
+        : act.tool === 'replace_lines'
+          ? computeStableHash(act.newCode ?? '')
+          : '';
     const toolSig = JSON.stringify([
       act.tool,
       act.file ?? act.from ?? act.path ?? act.command ?? act.pattern ?? '',
       act.startLine ?? '',
       act.endLine ?? '',
+      payloadDigest,
     ]);
-    if (toolSig === lastToolSig && act.tool !== 'run_command' && act.tool !== 'run_verify') {
-      latestFeedback = `[LOOP_GUARD] Repeated identical tool call (${act.tool}) detected. Choose a different tool, read a different slice, or finish.`;
+    const priorCount = toolSigCounts.get(toolSig) ?? 0;
+    const isIdempotentLoop =
+      priorCount >= 1 &&
+      act.tool !== 'run_command' &&
+      act.tool !== 'run_verify' &&
+      (act.tool === 'write_file' || act.tool === 'read_slice' || priorCount >= 2);
+    if (isIdempotentLoop) {
+      loopGuardHits += 1;
+      latestFeedback = `[LOOP_GUARD] Identical ${act.tool} call already succeeded in this turn (see [EXECUTED_STEPS]). Do NOT repeat it; proceed to another action or call finish immediately.`;
       failedNotes.push(`loop:${act.tool}`);
-      lastToolSig = null;
+      recordStepTrace(parsed.reasoning, `loop_guard:${act.tool}`, latestFeedback);
+      if (loopGuardHits >= 2 && actions.length > 0) {
+        finalReply = `Completed requested action(s): ${actions[actions.length - 1].summary}`;
+        break;
+      }
       continue;
     }
-    lastToolSig = toolSig;
+    toolSigCounts.set(toolSig, priorCount + 1);
 
     const toolTarget =
       act.file ?? act.from ?? act.pattern ?? act.path ?? act.command ?? 'workspace';
@@ -1383,6 +1473,9 @@ export async function runWorkspaceChatTurn(
     ) => {
       const action: ChatStepAction = {tool, target, ok: okFlag, summary};
       actions.push(action);
+      stepLedger.push(
+        `Step ${step}: ${tool}(${target}) -> ${okFlag ? 'OK' : 'ERR'}: ${summary}`,
+      );
       if (!okFlag) {
         failedNotes.push(`${tool}(${target}): ${summary}`.slice(0, 90));
       }
@@ -1410,10 +1503,7 @@ export async function runWorkspaceChatTurn(
         recordAction('grep_search', act.pattern ?? '', false, res.error.message);
         latestFeedback = `[GREP_ERR] ${res.error.message}`;
       }
-      continue;
-    }
-
-    if (act.tool === 'list_dir') {
+    } else if (act.tool === 'list_dir') {
       const res = await listDirectoryEntries(
         workspaceDir,
         act.path ?? '.',
@@ -1427,10 +1517,7 @@ export async function runWorkspaceChatTurn(
         recordAction('list_dir', act.path ?? '.', false, res.error.message);
         latestFeedback = `[LIST_ERR] ${res.error.message}`;
       }
-      continue;
-    }
-
-    if (act.tool === 'read_slice') {
+    } else if (act.tool === 'read_slice') {
       const target = act.file ?? '';
       const start = Math.max(1, act.startLine ?? 1);
       const end = Math.max(start, act.endLine ?? start + 140);
@@ -1454,123 +1541,112 @@ export async function runWorkspaceChatTurn(
         recordAction('read_slice', target, false, readRes.error.message);
         latestFeedback = `[READ_ERR] ${readRes.error.message}`;
       }
-      continue;
-    }
-
-    if (act.tool === 'write_file') {
+    } else if (act.tool === 'write_file') {
       const target = act.file ?? '';
       const safe = resolveSafeWorkspacePath(workspaceDir, target);
       if (safe.ok === false) {
         recordAction('write_file', target, false, safe.error.message);
         latestFeedback = `[WRITE_ERR] ${safe.error.message}`;
-        continue;
-      }
-      await captureFileBaseline(workspaceDir, target, turnRecord);
-      const cleanBody = stripAccidentalLineNumbers(act.content ?? '');
-      try {
-        await fs.mkdir(path.dirname(safe.value), {recursive: true});
-        await fs.writeFile(safe.value, cleanBody, 'utf8');
-        recordModified(target);
-        const numbered = await readWorkspaceFileNumbered(workspaceDir, target, 1, 140);
-        if (numbered.ok === true) {
-          openSlices.set(target, {
-            key: target,
-            rangeLabel: '1-140',
-            content: numbered.value,
-            lastUsedStep: step,
-          });
+      } else {
+        await captureFileBaseline(workspaceDir, target, turnRecord);
+        const cleanBody = stripAccidentalLineNumbers(act.content ?? '');
+        try {
+          await fs.mkdir(path.dirname(safe.value), {recursive: true});
+          await fs.writeFile(safe.value, cleanBody, 'utf8');
+          recordModified(target);
+          const numbered = await readWorkspaceFileNumbered(workspaceDir, target, 1, 140);
+          if (numbered.ok === true) {
+            openSlices.set(target, {
+              key: target,
+              rangeLabel: '1-140',
+              content: numbered.value,
+              lastUsedStep: step,
+            });
+          }
+          const lineCount = cleanBody.split('\n').length;
+          recordAction(
+            'write_file',
+            target,
+            true,
+            `Wrote ${lineCount} lines`,
+          );
+          latestFeedback = `[WRITE_OK] Wrote ${target} (${lineCount} lines). File content is already loaded in Slot 3; do NOT call read_slice on ${target}. Next: edit another file, run_command if tests apply, or call finish.`;
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          recordAction('write_file', target, false, msg);
+          latestFeedback = `[WRITE_ERR] ${msg}`;
         }
-        recordAction(
-          'write_file',
-          target,
-          true,
-          `Wrote ${cleanBody.split('\n').length} lines`,
-        );
-        latestFeedback = `[WRITE_OK] Wrote ${target}. Run run_command to verify if tests/build apply, or finish.`;
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        recordAction('write_file', target, false, msg);
-        latestFeedback = `[WRITE_ERR] ${msg}`;
       }
-      continue;
-    }
-
-    if (act.tool === 'replace_lines') {
+    } else if (act.tool === 'replace_lines') {
       const target = act.file ?? '';
       const safe = resolveSafeWorkspacePath(workspaceDir, target);
       if (safe.ok === false) {
         recordAction('replace_lines', target, false, safe.error.message);
         latestFeedback = `[PATCH_ERR] ${safe.error.message}`;
-        continue;
-      }
-      try {
-        const raw = (await fs.readFile(safe.value, 'utf8')).replace(/\r\n/g, '\n');
-        const lines = raw.split('\n');
-        const s = Math.max(1, act.startLine ?? 1);
-        const e = Math.min(lines.length, Math.max(s, act.endLine ?? s));
-        const expected = (act.expectedFirstLine ?? '')
-          .trim()
-          .replace(/^\d+\s\|\s?/, '');
-        const actualFirst = lines[s - 1]?.trim() ?? '';
-        if (expected && !actualFirst.includes(expected)) {
-          const msg = `First-line anchor mismatch at line ${s}: expected "${expected}", got "${actualFirst}"`;
-          recordAction('replace_lines', `${target}:${s}-${e}`, false, msg);
+      } else {
+        try {
+          const raw = (await fs.readFile(safe.value, 'utf8')).replace(/\r\n/g, '\n');
+          const lines = raw.split('\n');
+          const s = Math.max(1, act.startLine ?? 1);
+          const e = Math.min(lines.length, Math.max(s, act.endLine ?? s));
+          const expected = (act.expectedFirstLine ?? '')
+            .trim()
+            .replace(/^\d+\s\|\s?/, '');
+          const actualFirst = lines[s - 1]?.trim() ?? '';
+          if (expected && !actualFirst.includes(expected)) {
+            const msg = `First-line anchor mismatch at line ${s}: expected "${expected}", got "${actualFirst}"`;
+            recordAction('replace_lines', `${target}:${s}-${e}`, false, msg);
+            latestFeedback = `[PATCH_ERR] ${msg}`;
+          } else {
+            await captureFileBaseline(workspaceDir, target, turnRecord);
+            const replacement = stripAccidentalLineNumbers(act.newCode ?? '').split('\n');
+            const updated = [...lines.slice(0, s - 1), ...replacement, ...lines.slice(e)].join('\n');
+            await fs.writeFile(safe.value, updated, 'utf8');
+            recordModified(target);
+            const numbered = await readWorkspaceFileNumbered(workspaceDir, target, 1, 140);
+            if (numbered.ok === true) {
+              openSlices.set(target, {
+                key: target,
+                rangeLabel: '1-140',
+                content: numbered.value,
+                lastUsedStep: step,
+              });
+            }
+            recordAction(
+              'replace_lines',
+              `${target}:${s}-${e}`,
+              true,
+              `Replaced lines ${s}-${e} with ${replacement.length} lines`,
+            );
+            latestFeedback = `[PATCH_OK] Updated ${target}:${s}-${e}.`;
+          }
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          recordAction('replace_lines', target, false, msg);
           latestFeedback = `[PATCH_ERR] ${msg}`;
-          continue;
         }
-        await captureFileBaseline(workspaceDir, target, turnRecord);
-        const replacement = stripAccidentalLineNumbers(act.newCode ?? '').split('\n');
-        const updated = [...lines.slice(0, s - 1), ...replacement, ...lines.slice(e)].join('\n');
-        await fs.writeFile(safe.value, updated, 'utf8');
-        recordModified(target);
-        const numbered = await readWorkspaceFileNumbered(workspaceDir, target, 1, 140);
-        if (numbered.ok === true) {
-          openSlices.set(target, {
-            key: target,
-            rangeLabel: '1-140',
-            content: numbered.value,
-            lastUsedStep: step,
-          });
-        }
-        recordAction(
-          'replace_lines',
-          `${target}:${s}-${e}`,
-          true,
-          `Replaced lines ${s}-${e} with ${replacement.length} lines`,
-        );
-        latestFeedback = `[PATCH_OK] Updated ${target}:${s}-${e}.`;
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        recordAction('replace_lines', target, false, msg);
-        latestFeedback = `[PATCH_ERR] ${msg}`;
       }
-      continue;
-    }
-
-    if (act.tool === 'delete_file') {
+    } else if (act.tool === 'delete_file') {
       const target = act.file ?? '';
       const safe = resolveSafeWorkspacePath(workspaceDir, target);
       if (safe.ok === false) {
         recordAction('delete_file', target, false, safe.error.message);
         latestFeedback = `[DELETE_ERR] ${safe.error.message}`;
-        continue;
+      } else {
+        try {
+          await captureFileBaseline(workspaceDir, target, turnRecord);
+          await fs.rm(safe.value, {force: false});
+          openSlices.delete(target);
+          recordModified(target);
+          recordAction('delete_file', target, true, 'Deleted file (snapshot saved)');
+          latestFeedback = `[DELETE_OK] Deleted ${target}.`;
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          recordAction('delete_file', target, false, msg);
+          latestFeedback = `[DELETE_ERR] ${msg}`;
+        }
       }
-      try {
-        await captureFileBaseline(workspaceDir, target, turnRecord);
-        await fs.rm(safe.value, {force: false});
-        openSlices.delete(target);
-        recordModified(target);
-        recordAction('delete_file', target, true, 'Deleted file (snapshot saved)');
-        latestFeedback = `[DELETE_OK] Deleted ${target}.`;
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        recordAction('delete_file', target, false, msg);
-        latestFeedback = `[DELETE_ERR] ${msg}`;
-      }
-      continue;
-    }
-
-    if (act.tool === 'move_file') {
+    } else if (act.tool === 'move_file') {
       const from = act.from ?? act.file ?? '';
       const to = act.to ?? '';
       const safeFrom = resolveSafeWorkspacePath(workspaceDir, from);
@@ -1584,27 +1660,24 @@ export async function runWorkspaceChatTurn(
               : 'Invalid move path';
         recordAction('move_file', `${from} -> ${to}`, false, msg);
         latestFeedback = `[MOVE_ERR] ${msg}`;
-        continue;
+      } else {
+        try {
+          await captureFileBaseline(workspaceDir, from, turnRecord);
+          await captureFileBaseline(workspaceDir, to, turnRecord);
+          await fs.mkdir(path.dirname(safeTo.value), {recursive: true});
+          await fs.rename(safeFrom.value, safeTo.value);
+          openSlices.delete(from);
+          recordModified(from);
+          recordModified(to);
+          recordAction('move_file', `${from} -> ${to}`, true, 'Moved file');
+          latestFeedback = `[MOVE_OK] Moved ${from} -> ${to}.`;
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          recordAction('move_file', `${from} -> ${to}`, false, msg);
+          latestFeedback = `[MOVE_ERR] ${msg}`;
+        }
       }
-      try {
-        await captureFileBaseline(workspaceDir, from, turnRecord);
-        await captureFileBaseline(workspaceDir, to, turnRecord);
-        await fs.mkdir(path.dirname(safeTo.value), {recursive: true});
-        await fs.rename(safeFrom.value, safeTo.value);
-        openSlices.delete(from);
-        recordModified(from);
-        recordModified(to);
-        recordAction('move_file', `${from} -> ${to}`, true, 'Moved file');
-        latestFeedback = `[MOVE_OK] Moved ${from} -> ${to}.`;
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        recordAction('move_file', `${from} -> ${to}`, false, msg);
-        latestFeedback = `[MOVE_ERR] ${msg}`;
-      }
-      continue;
-    }
-
-    if (act.tool === 'run_command' || act.tool === 'run_verify') {
+    } else if (act.tool === 'run_command' || act.tool === 'run_verify') {
       const cmd = act.command?.trim() || verifyCommand;
       const v = await runWorkspaceVerify(workspaceDir, cmd);
       lastVerifyPassed = v.passed;
@@ -1642,7 +1715,12 @@ export async function runWorkspaceChatTurn(
         }
         latestFeedback = `[VERIFY_FAIL hash=${v.errorHash}] ${v.summary}\n${v.output}${ddiHint}`;
       }
+    } else {
+      latestFeedback = `[STEP_ERROR] Unknown tool "${String(act.tool)}".`;
+      failedNotes.push(`unknown_tool:${String(act.tool)}`);
     }
+
+    recordStepTrace(parsed.reasoning, act.tool, latestFeedback);
   }
 
   if (Object.keys(turnRecord.files).length > 0) {
@@ -1662,6 +1740,7 @@ export async function runWorkspaceChatTurn(
     turnId,
     reply: finalReply,
     actions,
+    stepTraces,
     modifiedFiles,
     frame: lastFrame!,
     verifyPassed: lastVerifyPassed,
@@ -1671,4 +1750,231 @@ export async function runWorkspaceChatTurn(
     staticHeadHash: lastFrame?.staticHeadHash ?? '--------',
     modelTier: activeTier,
   });
+}
+
+export async function runAllToolsRegression(
+  workspaceDir: string,
+): Promise<ToolRegressionReport> {
+  const suiteStart = Date.now();
+  const items: ToolRegressionItem[] = [];
+  const sandboxRel = '.contextharness-selftest';
+  const sandboxAbs = path.join(workspaceDir, sandboxRel);
+  const sampleRel = `${sandboxRel}/sample.ts`;
+  const movedRel = `${sandboxRel}/moved.ts`;
+
+  const runCheck = async (
+    name: string,
+    fn: () => Promise<{ok: boolean; detail: string}>,
+  ) => {
+    const t0 = Date.now();
+    try {
+      const res = await fn();
+      items.push({
+        name,
+        passed: res.ok,
+        durationMs: Math.max(1, Date.now() - t0),
+        detail: res.detail,
+      });
+    } catch (error) {
+      items.push({
+        name,
+        passed: false,
+        durationMs: Math.max(1, Date.now() - t0),
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  try {
+    await fs.rm(sandboxAbs, {recursive: true, force: true});
+    await fs.mkdir(sandboxAbs, {recursive: true});
+
+    await runCheck('1. write_file', async () => {
+      const safe = resolveSafeWorkspacePath(workspaceDir, sampleRel);
+      if (safe.ok === false) return {ok: false, detail: safe.error.message};
+      const code = [
+        'export function calculateScore(a: number, b: number): number {',
+        '  return a + b;',
+        '}',
+      ].join('\n');
+      await fs.writeFile(safe.value, code, 'utf8');
+      const written = await fs.readFile(safe.value, 'utf8');
+      return {
+        ok: written.includes('calculateScore'),
+        detail: `Created ${sampleRel} (${written.split('\n').length} lines)`,
+      };
+    });
+
+    await runCheck('2. list_dir', async () => {
+      const res = await listDirectoryEntries(workspaceDir, sandboxRel, 2);
+      if (res.ok === false) return {ok: false, detail: res.error.message};
+      const found = res.value.some((e) => e.endsWith('sample.ts'));
+      return {
+        ok: found,
+        detail: `Listed ${res.value.length} entries (${res.value.join(', ')})`,
+      };
+    });
+
+    await runCheck('3. grep_search', async () => {
+      const res = await grepWorkspaceFiles(
+        workspaceDir,
+        'calculateScore',
+        sandboxRel,
+        '.ts',
+      );
+      if (res.ok === false) return {ok: false, detail: res.error.message};
+      const hit = res.value.matches.some((m) => m.includes('sample.ts:1:'));
+      return {
+        ok: hit,
+        detail: res.value.matches[0] ?? '0 matches',
+      };
+    });
+
+    await runCheck('4. read_slice', async () => {
+      const res = await readWorkspaceFileNumbered(workspaceDir, sampleRel, 1, 3);
+      if (res.ok === false) return {ok: false, detail: res.error.message};
+      const hasLines =
+        res.value.includes('1 | export function') &&
+        res.value.includes('2 |   return a + b;');
+      return {
+        ok: hasLines,
+        detail: `Read numbered slice (${res.value.split('\n').length} lines)`,
+      };
+    });
+
+    await runCheck('5. replace_lines (patch + anchor guard)', async () => {
+      const safe = resolveSafeWorkspacePath(workspaceDir, sampleRel);
+      if (safe.ok === false) return {ok: false, detail: safe.error.message};
+      const raw = (await fs.readFile(safe.value, 'utf8')).replace(/\r\n/g, '\n');
+      const lines = raw.split('\n');
+      const actualLine2 = lines[1]?.trim() ?? '';
+      if (!actualLine2.includes('return a + b;')) {
+        return {ok: false, detail: `Unexpected line 2: ${actualLine2}`};
+      }
+      const updated = [
+        ...lines.slice(0, 1),
+        '  return a * 2 + b;',
+        ...lines.slice(2),
+      ].join('\n');
+      await fs.writeFile(safe.value, updated, 'utf8');
+      const reread = await fs.readFile(safe.value, 'utf8');
+      return {
+        ok: reread.includes('return a * 2 + b;'),
+        detail: 'Patched line 2 & verified expectedFirstLine anchor',
+      };
+    });
+
+    await runCheck('6. move_file', async () => {
+      const safeFrom = resolveSafeWorkspacePath(workspaceDir, sampleRel);
+      const safeTo = resolveSafeWorkspacePath(workspaceDir, movedRel);
+      if (safeFrom.ok === false || safeTo.ok === false) {
+        return {ok: false, detail: 'Safe path check failed'};
+      }
+      await fs.rename(safeFrom.value, safeTo.value);
+      const existsNew = await fs
+        .stat(safeTo.value)
+        .then(() => true)
+        .catch(() => false);
+      const existsOld = await fs
+        .stat(safeFrom.value)
+        .then(() => true)
+        .catch(() => false);
+      return {
+        ok: existsNew && !existsOld,
+        detail: `${sampleRel} -> ${movedRel}`,
+      };
+    });
+
+    await runCheck('7. run_command (pass + errorHash)', async () => {
+      const passRes = await runWorkspaceVerify(
+        workspaceDir,
+        'node -e "console.log(\'TOOL_VERIFY_OK\')"',
+      );
+      const failRes = await runWorkspaceVerify(
+        workspaceDir,
+        'node -e "console.error(\'EXPECTED_ERR\'); process.exit(2)"',
+      );
+      const okFlag = passRes.passed && !failRes.passed && Boolean(failRes.errorHash);
+      return {
+        ok: okFlag,
+        detail: `pass=${passRes.passed}; failHash=${failRes.errorHash ?? 'none'}`,
+      };
+    });
+
+    await runCheck('8. delete_file', async () => {
+      const safe = resolveSafeWorkspacePath(workspaceDir, movedRel);
+      if (safe.ok === false) return {ok: false, detail: safe.error.message};
+      await fs.rm(safe.value, {force: false});
+      const stillExists = await fs
+        .stat(safe.value)
+        .then(() => true)
+        .catch(() => false);
+      return {
+        ok: !stillExists,
+        detail: `Deleted ${movedRel}`,
+      };
+    });
+
+    await runCheck('9. path_traversal_guard', async () => {
+      const res = resolveSafeWorkspacePath(workspaceDir, '../../outside_escape.txt');
+      return {
+        ok: res.ok === false && res.error.code === 'WRITE_LOCK_VIOLATION',
+        detail:
+          res.ok === false ? res.error.message : 'SECURITY FAILURE: escaped root',
+      };
+    });
+
+    await runCheck('10. turn_snapshot_rollback', async () => {
+      const snapRel = `${sandboxRel}/rollback_target.txt`;
+      const safe = resolveSafeWorkspacePath(workspaceDir, snapRel);
+      if (safe.ok === false) return {ok: false, detail: safe.error.message};
+      await fs.writeFile(safe.value, 'ORIGINAL_BASELINE', 'utf8');
+
+      const tempTurnId = `SELFTEST-${Date.now()}`;
+      const record: TurnSnapshotRecord = {
+        turnId: tempTurnId,
+        timestamp: new Date().toISOString(),
+        userMessage: 'self-test rollback',
+        files: {},
+      };
+      await captureFileBaseline(workspaceDir, snapRel, record);
+      await fs.writeFile(safe.value, 'MUTATED_CONTENT', 'utf8');
+
+      const existing = await readTurnSnapshots(workspaceDir);
+      existing.push(record);
+      await writeTurnSnapshots(workspaceDir, existing);
+
+      const rb = await rollbackChatTurn(workspaceDir, tempTurnId);
+      const after = await fs.readFile(safe.value, 'utf8');
+      return {
+        ok: rb.ok === true && after === 'ORIGINAL_BASELINE',
+        detail:
+          rb.ok === true
+            ? `Restored ${rb.value.restoredFiles.join(', ')} -> "${after}"`
+            : rb.error.message,
+      };
+    });
+  } finally {
+    await fs.rm(sandboxAbs, {recursive: true, force: true});
+  }
+
+  return {
+    timestamp: new Date().toISOString(),
+    workspaceDir,
+    passedCount: items.filter((i) => i.passed).length,
+    totalCount: items.length,
+    durationMs: Math.max(1, Date.now() - suiteStart),
+    items,
+  };
+}
+
+export function getLiveAiRegressionPrompt(): string {
+  return [
+    'Execute an isolated multi-tool debug test strictly inside ".contextharness-e2e/" (do not touch any other files):',
+    '1. write_file ".contextharness-e2e/calc.js" exporting add(a, b) => a - b (intentional bug) and ".contextharness-e2e/calc.test.js" using node:test + node:assert asserting add(2, 3) === 5.',
+    '2. grep_search for "a - b" inside ".contextharness-e2e".',
+    '3. replace_lines in ".contextharness-e2e/calc.js" fixing a - b to a + b.',
+    '4. run_command "node --test .contextharness-e2e/calc.test.js".',
+    '5. delete_file both test files inside ".contextharness-e2e" after passing, then finish with the result.',
+  ].join('\n');
 }

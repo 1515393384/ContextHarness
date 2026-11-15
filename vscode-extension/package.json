@@ -55,6 +55,10 @@
         "title": "ContextHarness: Rollback Last Turn"
       },
       {
+        "command": "contextharness.runToolRegression",
+        "title": "ContextHarness: Run All-Tools Regression"
+      },
+      {
         "command": "contextharness.clearChat",
         "title": "ContextHarness: Clear Chat"
       }

@@ -252,6 +252,35 @@ export interface ChatMessageEntry {
   verifyPassed?: boolean;
 }
 
+export interface StepDebugTrace {
+  step: number;
+  modelTier: ModelTier;
+  durationMs: number;
+  finishReason: string;
+  cacheHitTokens: number;
+  frame: SlotFrame;
+  rawModelOutput: string;
+  parsedReasoning?: string;
+  parsedTool?: string;
+  toolFeedback: string;
+}
+
+export interface ToolRegressionItem {
+  name: string;
+  passed: boolean;
+  durationMs: number;
+  detail: string;
+}
+
+export interface ToolRegressionReport {
+  timestamp: string;
+  workspaceDir: string;
+  passedCount: number;
+  totalCount: number;
+  durationMs: number;
+  items: ToolRegressionItem[];
+}
+
 export type HarnessStreamEvent =
   | {
       type: 'step_start';
@@ -291,6 +320,10 @@ export type HarnessStreamEvent =
       type: 'step_error';
       step: number;
       message: string;
+    }
+  | {
+      type: 'step_trace';
+      trace: StepDebugTrace;
     };
 
 export interface HarnessWorkspaceSnapshot {

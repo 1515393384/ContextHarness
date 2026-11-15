@@ -3,8 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import * as vscode from 'vscode';
 import {
+  formatRecentTurnsSummary,
+  getLiveAiRegressionPrompt,
   getTurnBaselineMap,
   rollbackChatTurn,
+  runAllToolsRegression,
   runWorkspaceChatTurn,
 } from '../../lib/harness/core/workspace-chat-agent';
 import type {
@@ -12,6 +15,8 @@ import type {
   ChatStepAction,
   HarnessStreamEvent,
   ModelTier,
+  StepDebugTrace,
+  ToolRegressionReport,
 } from '../../lib/harness/types';
 import {getWebviewHtml} from './webviewHtml';
 
@@ -48,6 +53,8 @@ class SnapshotContentProvider implements vscode.TextDocumentContentProvider {
 class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private messages: ChatMessageEntry[] = [];
+  private traces: StepDebugTrace[] = [];
+  private regressionReport: ToolRegressionReport | null = null;
   private busy = false;
   private live: LiveStreamViewState | null = null;
   private error: string | null = null;
@@ -64,7 +71,7 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
     const nonce = crypto.randomBytes(16).toString('hex');
     webviewView.webview.html = getWebviewHtml(nonce);
 
-    webviewView.webview.onDidReceiveMessage(async (msg) => {
+    webviewView.webview.onDidReceiveMessage(async (msg: Record<string, unknown>) => {
       if (msg.type === 'ready') {
         await this.syncState();
       } else if (msg.type === 'send') {
@@ -79,10 +86,21 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
       } else if (msg.type === 'setApiKey') {
         await vscode.commands.executeCommand('contextharness.setApiKey');
         await this.syncState();
+      } else if (msg.type === 'showOutput') {
+        this.output.show(true);
       } else if (msg.type === 'clear') {
         this.clear();
       } else if (msg.type === 'openDiff') {
         await this.openDiff(String(msg.turnId ?? ''), String(msg.file ?? ''));
+      } else if (msg.type === 'runRegressionLocal') {
+        await this.runLocalRegressionSuite();
+      } else if (msg.type === 'runRegressionAi') {
+        await this.handleSend(
+          getLiveAiRegressionPrompt(),
+          'flash',
+          false,
+          false,
+        );
       }
     });
   }
@@ -94,9 +112,54 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
 
   public clear(): void {
     this.messages = [];
+    this.traces = [];
     this.lastTurnId = null;
     this.error = null;
     void this.syncState();
+  }
+
+  public async runLocalRegressionSuite(): Promise<void> {
+    if (this.busy) return;
+    const workspaceDir = this.getWorkspaceDir();
+    if (!workspaceDir) {
+      this.error = 'Open a workspace folder in VS Code first.';
+      await this.syncState();
+      return;
+    }
+
+    this.busy = true;
+    this.error = null;
+    this.view?.show?.(true);
+    void this.view?.webview.postMessage({type: 'openInspector'});
+    await this.syncState();
+
+    this.output.appendLine(`\n=== All-Tools Regression Self-Test (${workspaceDir}) ===`);
+    try {
+      const report = await runAllToolsRegression(workspaceDir);
+      this.regressionReport = report;
+      for (const item of report.items) {
+        this.output.appendLine(
+          `[${item.passed ? 'PASS' : 'FAIL'}] ${item.name} (${item.durationMs}ms) — ${item.detail}`,
+        );
+      }
+      this.output.appendLine(
+        `Summary: ${report.passedCount}/${report.totalCount} passed in ${report.durationMs}ms`,
+      );
+      if (report.passedCount === report.totalCount) {
+        void vscode.window.showInformationMessage(
+          `ContextHarness 10-tool regression passed (${report.passedCount}/${report.totalCount}, ${report.durationMs}ms).`,
+        );
+      } else {
+        void vscode.window.showWarningMessage(
+          `ContextHarness regression: ${report.passedCount}/${report.totalCount} passed. Check Inspector / Output.`,
+        );
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : String(err);
+    } finally {
+      this.busy = false;
+      await this.syncState();
+    }
   }
 
   public async rollbackLastTurn(): Promise<void> {
@@ -207,6 +270,8 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
         busy: this.busy,
         canRollback: Boolean(this.lastTurnId),
         messages: this.messages,
+        traces: this.traces,
+        regressionReport: this.regressionReport,
         live: this.live,
         error: this.error,
       },
@@ -245,9 +310,11 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
 
     const activeContext = includeSelection ? this.collectActiveSelection(workspaceDir) : undefined;
     const externalDiagnostics = includeDiagnostics ? this.collectDiagnostics(workspaceDir) : undefined;
+    const recentTurnsSummary = formatRecentTurnsSummary(this.messages);
 
     this.busy = true;
     this.error = null;
+    this.traces = [];
     this.messages.push({
       id: `MSG-${Date.now()}-u`,
       role: 'user',
@@ -320,6 +387,11 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
       } else if (ev.type === 'step_error') {
         this.live = {...this.live, statusLine: ev.message};
         this.output.appendLine(`  [STEP_ERROR] ${ev.message}`);
+      } else if (ev.type === 'step_trace') {
+        this.traces = [...this.traces, ev.trace];
+        this.output.appendLine(`  [AI RAW STEP ${ev.trace.step} (${ev.trace.durationMs}ms, finish=${ev.trace.finishReason})]:`);
+        this.output.appendLine(ev.trace.rawModelOutput);
+        this.output.appendLine(`  [FEEDBACK STEP ${ev.trace.step}]: ${ev.trace.toolFeedback}`);
       }
       void this.syncState();
     };
@@ -337,6 +409,7 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
         maxSteps,
         activeContext,
         externalDiagnostics,
+        recentTurnsSummary,
         onEvent,
       });
 
@@ -345,6 +418,7 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
           ? `${res.error.message}: ${res.error.details}`
           : res.error.message;
       } else {
+        this.traces = res.value.stepTraces;
         this.messages.push({
           id: `MSG-${Date.now()}-a`,
           role: 'assistant',
@@ -414,6 +488,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('contextharness.rollbackLastTurn', () =>
       provider.rollbackLastTurn(),
+    ),
+    vscode.commands.registerCommand('contextharness.runToolRegression', () =>
+      provider.runLocalRegressionSuite(),
     ),
     vscode.commands.registerCommand('contextharness.clearChat', () => {
       provider.clear();

@@ -18,6 +18,7 @@ import {
 } from './core/orchestrator';
 import {
   ensureWorkspaceDirectory,
+  formatRecentTurnsSummary,
   getDefaultSandboxDir,
   listWorkspaceFiles,
   readWorkspaceFileNumbered,
@@ -446,6 +447,8 @@ export async function sendChatMessage(
     tierOverride ??
     (snapshot.adapters.modelAdapter === 'deepseek-pro' ? 'pro' : 'flash');
 
+  const recentTurnsSummary = formatRecentTurnsSummary(messages);
+
   const turnRes = await runWorkspaceChatTurn({
     workspaceDir: targetDir,
     userMessage: message,
@@ -455,6 +458,7 @@ export async function sendChatMessage(
     baseUrl: process.env.DEEPSEEK_BASE_URL,
     flashModel: process.env.DEEPSEEK_MODEL_FLASH,
     proModel: process.env.DEEPSEEK_MODEL_PRO,
+    recentTurnsSummary,
     onEvent,
   });
 
