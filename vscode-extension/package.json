@@ -1,0 +1,113 @@
+{
+  "name": "contextharness-vscode",
+  "displayName": "ContextHarness",
+  "description": "Stateless 4K-8K bounded-context coding driver with Prefix Cache, 9-tool universal execution, DDI circuit breaker, LSP diagnostics injection, and 1-click turn rollback.",
+  "version": "0.1.0",
+  "publisher": "contextharness",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onView:contextharness.chatView",
+    "onCommand:contextharness.openChat",
+    "onCommand:contextharness.askWithSelection",
+    "onCommand:contextharness.setApiKey"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "contextharness",
+          "title": "ContextHarness",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "contextharness": [
+        {
+          "type": "webview",
+          "id": "contextharness.chatView",
+          "name": "4-Slot Agent"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "contextharness.openChat",
+        "title": "ContextHarness: Open 4-Slot Agent"
+      },
+      {
+        "command": "contextharness.askWithSelection",
+        "title": "ContextHarness: Ask About Selection"
+      },
+      {
+        "command": "contextharness.setApiKey",
+        "title": "ContextHarness: Set DeepSeek API Key"
+      },
+      {
+        "command": "contextharness.rollbackLastTurn",
+        "title": "ContextHarness: Rollback Last Turn"
+      },
+      {
+        "command": "contextharness.clearChat",
+        "title": "ContextHarness: Clear Chat"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "contextharness.askWithSelection",
+          "when": "editorHasSelection",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "ContextHarness",
+      "properties": {
+        "contextharness.baseUrl": {
+          "type": "string",
+          "default": "https://api.deepseek.com/v1",
+          "description": "OpenAI-compatible / DeepSeek API base URL."
+        },
+        "contextharness.flashModel": {
+          "type": "string",
+          "default": "deepseek-chat",
+          "description": "Fast default Flash tier model."
+        },
+        "contextharness.proModel": {
+          "type": "string",
+          "default": "deepseek-reasoner",
+          "description": "Escalated Pro / Reasoner tier model for DDI circuit breaker."
+        },
+        "contextharness.verifyCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Optional custom verify command. Leave blank for auto-detection or .contextharness.json."
+        },
+        "contextharness.maxSteps": {
+          "type": "number",
+          "default": 14,
+          "description": "Maximum bounded micro-steps per user turn."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -13,9 +13,25 @@ import {WorkbenchView} from '@/components/harness/WorkbenchView';
 import {UI_COPY, type UiLocale} from '@/lib/harness/i18n';
 import type {
   AdapterProfile,
+  ChatStepAction,
+  HarnessStreamEvent,
   HarnessWorkspaceSnapshot,
   ModelTier,
 } from '@/lib/harness/types';
+
+export interface LiveChatStreamState {
+  step: number;
+  maxSteps: number;
+  modelTier: ModelTier;
+  frameTokens: number;
+  budgetCeiling: number;
+  staticHeadHash: string;
+  cacheHitTokens: number;
+  streamChars: number;
+  streamTail: string;
+  actions: ChatStepAction[];
+  statusLine: string;
+}
 
 export default function HomePage() {
   const [snapshot, setSnapshot] = useState<HarnessWorkspaceSnapshot | null>(
@@ -34,6 +50,7 @@ export default function HomePage() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('chat');
   const [locale, setLocale] = useState<UiLocale>('en');
   const [busy, setBusy] = useState(false);
+  const [liveStream, setLiveStream] = useState<LiveChatStreamState | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const t = UI_COPY[locale];
 
@@ -134,6 +151,142 @@ export default function HomePage() {
     }
   }
 
+  async function streamChatMessage(
+    message: string,
+    modelTier: ModelTier,
+  ): Promise<boolean> {
+    setBusy(true);
+    setErrorMsg(null);
+    setLiveStream({
+      step: 1,
+      maxSteps: 14,
+      modelTier,
+      frameTokens: 0,
+      budgetCeiling: modelTier === 'pro' ? 8000 : 6000,
+      staticHeadHash: '--------',
+      cacheHitTokens: 0,
+      streamChars: 0,
+      streamTail: '',
+      actions: [],
+      statusLine: 'Compiling 4-Slot frame...',
+    });
+
+    try {
+      const res = await fetch('/api/harness/stream', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({message, modelTier}),
+      });
+
+      if (res.ok === false || !res.body) {
+        const errData = (await res.json().catch(() => ({}))) as {error?: string};
+        setErrorMsg(errData.error ?? 'Streaming request failed.');
+        return false;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let succeeded = false;
+
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, {stream: true});
+        const events = buf.split('\n\n');
+        buf = events.pop() ?? '';
+
+        for (const rawEv of events) {
+          const line = rawEv
+            .split('\n')
+            .find((l) => l.startsWith('data:'));
+          if (!line) continue;
+          try {
+            const ev = JSON.parse(line.slice(5).trim()) as
+              | HarnessStreamEvent
+              | {type: 'done'; snapshot: HarnessWorkspaceSnapshot}
+              | {type: 'error'; message: string};
+
+            if (ev.type === 'step_start') {
+              setLiveStream((prev) => ({
+                step: ev.step,
+                maxSteps: ev.maxSteps,
+                modelTier: ev.modelTier,
+                frameTokens: ev.frameTokens,
+                budgetCeiling: ev.budgetCeiling,
+                staticHeadHash: ev.staticHeadHash,
+                cacheHitTokens: ev.cacheHitTokens,
+                streamChars: 0,
+                streamTail: '',
+                actions: prev?.actions ?? [],
+                statusLine: `Step ${ev.step}/${ev.maxSteps}: waiting for ${ev.modelTier} stream...`,
+              }));
+            } else if (ev.type === 'model_delta') {
+              setLiveStream((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      streamChars: ev.charCount,
+                      streamTail: (prev.streamTail + ev.delta).slice(-240),
+                      statusLine: `Step ${ev.step}: streaming model JSON (${ev.charCount} chars)...`,
+                    }
+                  : prev,
+              );
+            } else if (ev.type === 'tool_start') {
+              setLiveStream((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      statusLine: `Step ${ev.step}: executing ${ev.tool}(${ev.target})...`,
+                    }
+                  : prev,
+              );
+            } else if (ev.type === 'tool_done') {
+              setLiveStream((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      actions: [...prev.actions, ev.action],
+                      statusLine: `Step ${ev.step}: ${ev.action.tool} ${ev.action.ok ? 'OK' : 'ERR'}`,
+                    }
+                  : prev,
+              );
+            } else if (ev.type === 'ddi_escalate') {
+              setLiveStream((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      modelTier: ev.toTier,
+                      statusLine: `DDI Escalated (${ev.errorHash}) -> ${ev.toTier}`,
+                    }
+                  : prev,
+              );
+            } else if (ev.type === 'step_error') {
+              setLiveStream((prev) =>
+                prev ? {...prev, statusLine: ev.message} : prev,
+              );
+            } else if (ev.type === 'error') {
+              setErrorMsg(ev.message);
+            } else if (ev.type === 'done') {
+              setSnapshot(ev.snapshot);
+              succeeded = true;
+            }
+          } catch {
+            // ignore malformed SSE packet
+          }
+        }
+      }
+
+      return succeeded;
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Streaming failed.');
+      return false;
+    } finally {
+      setLiveStream(null);
+      setBusy(false);
+    }
+  }
+
   const allPassed = Boolean(
     snapshot &&
       snapshot.tasks.length > 0 &&
@@ -174,10 +327,11 @@ export default function HomePage() {
           </div>
         </main>
       ) : activeTab === 'chat' ? (
-        <ChatWorkspaceView
+          <ChatWorkspaceView
           snapshot={snapshot}
           locale={locale}
           busy={busy}
+          liveStream={liveStream}
           onSetWorkspace={(workspaceDir, verifyCommand, createIfMissing) =>
             void postAction({
               action: 'set_chat_workspace',
@@ -192,13 +346,8 @@ export default function HomePage() {
               verifyCommand,
             })
           }
-          onSendMessage={(message: string, modelTier: ModelTier) =>
-            postAction({
-              action: 'chat_send',
-              message,
-              modelTier,
-            })
-          }
+          onSendMessage={streamChatMessage}
+          onRollbackTurn={() => void postAction({action: 'rollback_chat_turn'})}
           onClearChat={() => void postAction({action: 'clear_chat'})}
           onReadFile={readChatFile}
         />

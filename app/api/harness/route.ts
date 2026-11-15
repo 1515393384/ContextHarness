@@ -7,6 +7,7 @@ import {
   loadSnapshot,
   previewTaskFrame,
   readChatWorkspaceFile,
+  rollbackLastChatTurn,
   saveSnapshot,
   sendChatMessage,
   setChatWorkspace,
@@ -36,6 +37,7 @@ export async function POST(req: NextRequest) {
         | 'read_chat_file'
         | 'verify_chat_workspace'
         | 'chat_send'
+        | 'rollback_chat_turn'
         | 'clear_chat';
       prompt?: string;
       targetLanguage?: TargetLanguage;
@@ -208,6 +210,17 @@ export async function POST(req: NextRequest) {
           );
         }
         const res = await sendChatMessage(current, msg, body.modelTier);
+        if (res.ok === false) {
+          return NextResponse.json(
+            {ok: false, error: res.error.message},
+            {status: 400},
+          );
+        }
+        return NextResponse.json({ok: true, snapshot: res.value});
+      }
+
+      case 'rollback_chat_turn': {
+        const res = await rollbackLastChatTurn(current);
         if (res.ok === false) {
           return NextResponse.json(
             {ok: false, error: res.error.message},

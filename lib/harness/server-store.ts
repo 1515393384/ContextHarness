@@ -21,6 +21,7 @@ import {
   getDefaultSandboxDir,
   listWorkspaceFiles,
   readWorkspaceFileNumbered,
+  rollbackChatTurn,
   runWorkspaceChatTurn,
   runWorkspaceVerify,
 } from './core/workspace-chat-agent';
@@ -30,6 +31,7 @@ import {
   type AdapterProfile,
   type ChatMessageEntry,
   type HarnessError,
+  type HarnessStreamEvent,
   type HarnessWorkspaceSnapshot,
   type ModelTier,
   type Result,
@@ -422,6 +424,7 @@ export async function sendChatMessage(
   snapshot: HarnessWorkspaceSnapshot,
   message: string,
   tierOverride?: ModelTier,
+  onEvent?: (event: HarnessStreamEvent) => void,
 ): Promise<Result<HarnessWorkspaceSnapshot, HarnessError>> {
   const dir = snapshot.chatWorkspaceDir ?? getDefaultSandboxDir();
   const dirRes = await ensureWorkspaceDirectory(dir, dir === getDefaultSandboxDir());
@@ -452,6 +455,7 @@ export async function sendChatMessage(
     baseUrl: process.env.DEEPSEEK_BASE_URL,
     flashModel: process.env.DEEPSEEK_MODEL_FLASH,
     proModel: process.env.DEEPSEEK_MODEL_PRO,
+    onEvent,
   });
 
   if (turnRes.ok === false) {
@@ -464,6 +468,8 @@ export async function sendChatMessage(
     content: turnRes.value.reply,
     workspaceDir: targetDir,
     timestamp: new Date().toISOString(),
+    turnId: turnRes.value.turnId,
+    modifiedFiles: turnRes.value.modifiedFiles,
     modelTier: turnRes.value.modelTier,
     frameTokens: turnRes.value.frameTokens,
     budgetCeiling: turnRes.value.budgetCeiling,
@@ -475,8 +481,36 @@ export async function sendChatMessage(
 
   messages.push(userEntry, assistantEntry);
   snapshot.chatMessages = messages;
+  if (turnRes.value.modifiedFiles.length > 0) {
+    snapshot.lastChatTurnId = turnRes.value.turnId;
+  }
   snapshot.lastFrame = turnRes.value.frame;
   snapshot.chatFiles = await listWorkspaceFiles(targetDir);
+  await saveSnapshot(snapshot);
+  return ok(snapshot);
+}
+
+export async function rollbackLastChatTurn(
+  snapshot: HarnessWorkspaceSnapshot,
+  turnId?: string,
+): Promise<Result<HarnessWorkspaceSnapshot, HarnessError>> {
+  const dir = snapshot.chatWorkspaceDir ?? getDefaultSandboxDir();
+  const res = await rollbackChatTurn(dir, turnId ?? snapshot.lastChatTurnId);
+  if (res.ok === false) {
+    return {ok: false, error: res.error};
+  }
+
+  const messages = [...(snapshot.chatMessages ?? [])];
+  messages.push({
+    id: `MSG-${Date.now()}-rb`,
+    role: 'assistant',
+    content: `Rolled back turn ${res.value.turnId}. Restored files: ${res.value.restoredFiles.join(', ') || 'none'}.`,
+    workspaceDir: dir,
+    timestamp: new Date().toISOString(),
+  });
+  snapshot.chatMessages = messages;
+  snapshot.lastChatTurnId = null;
+  snapshot.chatFiles = await listWorkspaceFiles(dir);
   await saveSnapshot(snapshot);
   return ok(snapshot);
 }
@@ -485,6 +519,7 @@ export async function clearChatHistory(
   snapshot: HarnessWorkspaceSnapshot,
 ): Promise<HarnessWorkspaceSnapshot> {
   snapshot.chatMessages = [];
+  snapshot.lastChatTurnId = null;
   await saveSnapshot(snapshot);
   return snapshot;
 }

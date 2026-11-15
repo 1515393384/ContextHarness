@@ -132,6 +132,8 @@ export interface UiDictionary {
     tierPro: string;
     sendBtn: string;
     sendingBtn: string;
+    rollbackBtn: string;
+    streamingTitle: string;
   };
 }
 
@@ -313,6 +315,8 @@ export const UI_COPY: Record<UiLocale, UiDictionary> = {
       tierPro: 'Pro (Reasoner)',
       sendBtn: 'Send Task',
       sendingBtn: 'Executing...',
+      rollbackBtn: 'Rollback Last Turn',
+      streamingTitle: 'Live Micro-Step Stream',
     },
   },
   zh: {
@@ -489,6 +493,8 @@ export const UI_COPY: Record<UiLocale, UiDictionary> = {
       tierPro: 'Pro (Reasoner)',
       sendBtn: '发送执行',
       sendingBtn: '执行中...',
+      rollbackBtn: '撤销上轮改动',
+      streamingTitle: '实时微步执行流',
     },
   },
 };

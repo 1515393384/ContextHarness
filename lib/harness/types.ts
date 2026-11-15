@@ -216,8 +216,20 @@ export interface AdapterProfile {
   modelAdapter: ModelAdapterKind;
 }
 
+export type ChatToolName =
+  | 'list_files'
+  | 'list_dir'
+  | 'grep_search'
+  | 'read_slice'
+  | 'write_file'
+  | 'replace_lines'
+  | 'delete_file'
+  | 'move_file'
+  | 'run_command'
+  | 'run_verify';
+
 export interface ChatStepAction {
-  tool: 'list_files' | 'read_slice' | 'write_file' | 'replace_lines' | 'run_verify';
+  tool: ChatToolName;
   target: string;
   ok: boolean;
   summary: string;
@@ -229,6 +241,8 @@ export interface ChatMessageEntry {
   content: string;
   workspaceDir: string;
   timestamp: string;
+  turnId?: string;
+  modifiedFiles?: string[];
   modelTier?: ModelTier;
   frameTokens?: number;
   budgetCeiling?: number;
@@ -237,6 +251,47 @@ export interface ChatMessageEntry {
   actions?: ChatStepAction[];
   verifyPassed?: boolean;
 }
+
+export type HarnessStreamEvent =
+  | {
+      type: 'step_start';
+      step: number;
+      maxSteps: number;
+      modelTier: ModelTier;
+      frameTokens: number;
+      budgetCeiling: number;
+      staticHeadHash: string;
+      cacheHitTokens: number;
+    }
+  | {
+      type: 'model_delta';
+      step: number;
+      delta: string;
+      charCount: number;
+    }
+  | {
+      type: 'tool_start';
+      step: number;
+      tool: string;
+      target: string;
+    }
+  | {
+      type: 'tool_done';
+      step: number;
+      action: ChatStepAction;
+    }
+  | {
+      type: 'ddi_escalate';
+      step: number;
+      errorHash: string;
+      fromTier: ModelTier;
+      toTier: ModelTier;
+    }
+  | {
+      type: 'step_error';
+      step: number;
+      message: string;
+    };
 
 export interface HarnessWorkspaceSnapshot {
   spec: SpecDocument;
@@ -254,4 +309,5 @@ export interface HarnessWorkspaceSnapshot {
   chatVerifyCommand?: string;
   chatFiles?: string[];
   chatMessages?: ChatMessageEntry[];
+  lastChatTurnId?: string | null;
 }

@@ -1,6 +1,7 @@
 'use client';
 
 import {useState} from 'react';
+import type {LiveChatStreamState} from '@/app/page';
 import {UI_COPY, type UiLocale} from '@/lib/harness/i18n';
 import type {HarnessWorkspaceSnapshot, ModelTier} from '@/lib/harness/types';
 
@@ -8,6 +9,7 @@ interface ChatWorkspaceViewProps {
   snapshot: HarnessWorkspaceSnapshot;
   locale: UiLocale;
   busy: boolean;
+  liveStream: LiveChatStreamState | null;
   onSetWorkspace: (
     workspaceDir: string,
     verifyCommand: string,
@@ -15,6 +17,7 @@ interface ChatWorkspaceViewProps {
   ) => void;
   onRunVerify: (verifyCommand: string) => void;
   onSendMessage: (message: string, modelTier: ModelTier) => Promise<boolean>;
+  onRollbackTurn: () => void;
   onClearChat: () => void;
   onReadFile: (filePath: string) => Promise<string | null>;
 }
@@ -23,9 +26,11 @@ export function ChatWorkspaceView({
   snapshot,
   locale,
   busy,
+  liveStream,
   onSetWorkspace,
   onRunVerify,
   onSendMessage,
+  onRollbackTurn,
   onClearChat,
   onReadFile,
 }: ChatWorkspaceViewProps) {
@@ -239,16 +244,28 @@ export function ChatWorkspaceView({
                 {snapshot.deepseekConfigured ? t.gatewayReady : t.gatewayUnset}
               </div>
             </div>
-            {messages.length > 0 && (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={onClearChat}
-                className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-              >
-                {t.clearBtn}
-              </button>
-            )}
+            <div className="flex items-center gap-2">
+              {snapshot.lastChatTurnId && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={onRollbackTurn}
+                  className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+                >
+                  {t.rollbackBtn}
+                </button>
+              )}
+              {messages.length > 0 && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={onClearChat}
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  {t.clearBtn}
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="min-h-[380px] max-h-[540px] flex-1 space-y-4 overflow-y-auto p-6">
@@ -324,6 +341,56 @@ export function ChatWorkspaceView({
                   )}
                 </div>
               ))
+            )}
+
+            {liveStream && (
+              <div className="rounded-lg border border-slate-300 bg-slate-50 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="font-semibold text-slate-900">
+                    {t.streamingTitle} ({liveStream.step}/{liveStream.maxSteps})
+                  </span>
+                  <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-slate-600 tabular-nums">
+                    <span>{liveStream.modelTier === 'pro' ? 'Pro' : 'Flash-1017'}</span>
+                    <span>
+                      · {liveStream.frameTokens.toLocaleString()}/
+                      {liveStream.budgetCeiling.toLocaleString()} tok
+                    </span>
+                    {liveStream.cacheHitTokens > 0 && (
+                      <span>· cacheHit {liveStream.cacheHitTokens}</span>
+                    )}
+                    <span>· #{liveStream.staticHeadHash}</span>
+                  </div>
+                </div>
+                <div className="mt-2 font-mono text-xs text-slate-800">
+                  {liveStream.statusLine}
+                </div>
+                {liveStream.streamTail && (
+                  <pre className="mt-2 max-h-[120px] overflow-hidden whitespace-pre-wrap break-all rounded border border-slate-200 bg-white p-2.5 font-mono text-[11px] text-slate-600">
+                    {liveStream.streamTail}
+                  </pre>
+                )}
+                {liveStream.actions.length > 0 && (
+                  <ul className="mt-2.5 space-y-1 border-t border-slate-200 pt-2">
+                    {liveStream.actions.map((act, idx) => (
+                      <li
+                        key={`live-act-${idx}`}
+                        className="flex flex-wrap items-baseline gap-2 font-mono text-[11px]"
+                      >
+                        <span
+                          className={
+                            act.ok ? 'font-semibold text-emerald-700' : 'font-semibold text-red-700'
+                          }
+                        >
+                          {act.ok ? 'OK' : 'ERR'}
+                        </span>
+                        <span className="font-semibold text-slate-800">{act.tool}</span>
+                        <span className="text-slate-600">{act.target}</span>
+                        <span className="text-slate-500">— {act.summary}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             )}
           </div>
 
