@@ -26,7 +26,7 @@ export default function HomePage() {
     contractFile: 'lib/harness/types.ts',
     testFile: 'lib/harness/core/harness.test.ts',
     startLine: 32,
-    endLine: 78,
+    endLine: 83,
   });
   const [activeTab, setActiveTab] = useState<ActiveTab>('workbench');
   const [busy, setBusy] = useState(false);
@@ -60,7 +60,7 @@ export default function HomePage() {
               testFile:
                 active?.testFile ?? 'lib/harness/core/harness.test.ts',
               startLine: active?.writeLock.editableRange.startLine ?? 32,
-              endLine: active?.writeLock.editableRange.endLine ?? 78,
+              endLine: active?.writeLock.editableRange.endLine ?? 83,
             });
           } else {
             setErrorMsg(data.error ?? 'Failed to load workspace snapshot.');

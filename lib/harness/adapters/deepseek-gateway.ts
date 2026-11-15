@@ -55,7 +55,7 @@ export class DeepSeekModelGateway implements ModelGatewayPort {
       frame.slot2ContractAnchors.content,
       frame.slot3SurgicalSlice.content,
       frame.slot4VerifyFeedback.content,
-      'Respond strictly as JSON with shape: {"reasoningSummary": string, "patch": {"file": string, "startLine": number, "endLine": number, "expectedFirstLine": string, "newCode": string}}',
+      'Respond strictly as JSON with shape: {"reasoningSummary": string, "patch": {"file": string, "startLine": number, "endLine": number, "expectedFirstLine": string, "newCode": string}}. Do NOT include line-number prefixes (like "32 | ") in newCode or expectedFirstLine, and ensure newCode completely replaces lines [startLine..endLine] with balanced braces.',
     ].join('\n\n');
 
     try {

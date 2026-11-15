@@ -227,4 +227,5 @@ export interface HarnessWorkspaceSnapshot {
   lastVerify: VerifyResult | null;
   adapters: AdapterProfile;
   deepseekConfigured: boolean;
+  taskInitialSnapshots?: Record<string, string>;
 }

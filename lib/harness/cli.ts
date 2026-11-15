@@ -30,7 +30,7 @@ async function main(): Promise<void> {
   const contractFile = getArg(args, '--contract', 'lib/harness/types.ts');
   const testFile = getArg(args, '--test', 'lib/harness/core/harness.test.ts');
   const startLine = Number(getArg(args, '--start', '32'));
-  const endLine = Number(getArg(args, '--end', '78'));
+  const endLine = Number(getArg(args, '--end', '83'));
   const compileOnly = args.includes('--compile-only');
   const verifyOnly = args.includes('--verify-only');
 

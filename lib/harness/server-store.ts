@@ -92,7 +92,7 @@ export async function createFreshSnapshot(
       contractFile: 'lib/harness/types.ts',
       testFile: 'lib/harness/core/harness.test.ts',
       startLine: 32,
-      endLine: 78,
+      endLine: 83,
     },
   );
 
@@ -139,6 +139,24 @@ export async function loadSnapshot(): Promise<HarnessWorkspaceSnapshot> {
     const raw = await fs.readFile(STATE_PATH, 'utf8');
     const parsed = JSON.parse(raw) as HarnessWorkspaceSnapshot;
     parsed.deepseekConfigured = isDeepSeekConfigured();
+    let migrated = false;
+    for (const task of parsed.tasks ?? []) {
+      if (
+        task.targetFile === 'lib/harness/core/token-budget.ts' &&
+        task.writeLock?.editableRange?.startLine === 32 &&
+        task.writeLock?.editableRange?.endLine === 78
+      ) {
+        task.writeLock.editableRange.endLine = 83;
+        migrated = true;
+      }
+    }
+    if (migrated && parsed.spec?.inputOutputSummary?.includes('token-budget.ts:32-78')) {
+      parsed.spec.inputOutputSummary = parsed.spec.inputOutputSummary.replace(
+        'token-budget.ts:32-78',
+        'token-budget.ts:32-83',
+      );
+      await saveSnapshot(parsed);
+    }
     return parsed;
   } catch {
     return createFreshSnapshot();
@@ -253,12 +271,14 @@ export async function executeStep(
     lastFrame: snapshot.lastFrame,
     lastVerify: snapshot.lastVerify,
     lastStaticHeadHash: snapshot.lastFrame?.staticHeadHash ?? null,
+    taskInitialSnapshots: snapshot.taskInitialSnapshots,
   };
 
   const outcome = await runSingleStep(orchState, ports);
   snapshot.traces = orchState.traces;
   snapshot.lastFrame = orchState.lastFrame;
   snapshot.lastVerify = orchState.lastVerify;
+  snapshot.taskInitialSnapshots = orchState.taskInitialSnapshots;
   if (outcome.trace) {
     snapshot.activeTaskId = outcome.trace.taskId;
   }
@@ -279,12 +299,14 @@ export async function executeClosedLoop(
     lastFrame: snapshot.lastFrame,
     lastVerify: snapshot.lastVerify,
     lastStaticHeadHash: snapshot.lastFrame?.staticHeadHash ?? null,
+    taskInitialSnapshots: snapshot.taskInitialSnapshots,
   };
 
   const outcomes = await runClosedLoop(orchState, ports, 10);
   snapshot.traces = orchState.traces;
   snapshot.lastFrame = orchState.lastFrame;
   snapshot.lastVerify = orchState.lastVerify;
+  snapshot.taskInitialSnapshots = orchState.taskInitialSnapshots;
   const lastOutcome = outcomes[outcomes.length - 1];
   if (lastOutcome?.trace) {
     snapshot.activeTaskId = lastOutcome.trace.taskId;

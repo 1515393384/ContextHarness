@@ -68,7 +68,7 @@ export function buildSpecAndDag(input: TaskPlanInput): {
   const contractFile = input.contractFile?.trim() || 'lib/harness/types.ts';
   const testFile = input.testFile?.trim() || 'lib/harness/core/harness.test.ts';
   const startLine = Math.max(1, input.startLine ?? 32);
-  const endLine = Math.max(startLine, input.endLine ?? 78);
+  const endLine = Math.max(startLine, input.endLine ?? 83);
 
   const spec: SpecDocument = {
     id: 'SPEC-01',
