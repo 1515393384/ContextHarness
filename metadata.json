@@ -1,0 +1,6 @@
+{
+  "name": "ContextHarness",
+  "description": "Fixed-budget (3K–8K) context-driven coding harness with 4-slot prompt compiler, read-only contract locks, and DDI circuit breaker.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
