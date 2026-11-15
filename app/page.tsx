@@ -251,6 +251,15 @@ export default function HomePage() {
                     }
                   : prev,
               );
+            } else if (ev.type === 'ddi_rollback') {
+              setLiveStream((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      statusLine: `DDI Rollback (${ev.errorHash}): restored ${ev.restoredFiles.join(', ') || 'state'}`,
+                    }
+                  : prev,
+              );
             } else if (ev.type === 'ddi_escalate') {
               setLiveStream((prev) =>
                 prev

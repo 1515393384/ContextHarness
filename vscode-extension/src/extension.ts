@@ -9,9 +9,11 @@ import {
   rollbackChatTurn,
   runAllToolsRegression,
   runWorkspaceChatTurn,
+  type LspBridgePort,
 } from '../../lib/harness/core/workspace-chat-agent';
 import type {
   ChatMessageEntry,
+  ChatSessionRecord,
   ChatStepAction,
   HarnessStreamEvent,
   ModelTier,
@@ -50,8 +52,18 @@ class SnapshotContentProvider implements vscode.TextDocumentContentProvider {
   }
 }
 
+const SESSION_STORAGE_KEY = 'contextharness.sessions.v1';
+const MAX_STORED_SESSIONS = 15;
+
+interface StoredSessionsPayload {
+  activeSessionId: string;
+  sessions: ChatSessionRecord[];
+}
+
 class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
+  private sessions: ChatSessionRecord[] = [];
+  private activeSessionId = '';
   private messages: ChatMessageEntry[] = [];
   private traces: StepDebugTrace[] = [];
   private regressionReport: ToolRegressionReport | null = null;
@@ -63,7 +75,76 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly output: vscode.OutputChannel,
-  ) {}
+  ) {
+    this.hydrateSessions();
+  }
+
+  private createEmptySession(): ChatSessionRecord {
+    return {
+      id: `SES-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      title: 'New Session',
+      updatedAt: new Date().toISOString(),
+      messages: [],
+      lastTurnId: null,
+    };
+  }
+
+  private hydrateSessions(): void {
+    const saved = this.context.workspaceState.get<StoredSessionsPayload>(
+      SESSION_STORAGE_KEY,
+    );
+    if (saved && Array.isArray(saved.sessions) && saved.sessions.length > 0) {
+      this.sessions = saved.sessions;
+      const found =
+        this.sessions.find((s) => s.id === saved.activeSessionId) ??
+        this.sessions[0];
+      this.activeSessionId = found.id;
+      this.messages = [...found.messages];
+      this.lastTurnId = found.lastTurnId ?? null;
+    } else {
+      const fresh = this.createEmptySession();
+      this.sessions = [fresh];
+      this.activeSessionId = fresh.id;
+      this.messages = [];
+      this.lastTurnId = null;
+    }
+  }
+
+  private async persistActiveSession(): Promise<void> {
+    const firstUserMsg = this.messages.find((m) => m.role === 'user');
+    const derivedTitle = firstUserMsg
+      ? firstUserMsg.content.replace(/\s+/g, ' ').trim().slice(0, 36)
+      : 'New Session';
+
+    const existingIdx = this.sessions.findIndex(
+      (s) => s.id === this.activeSessionId,
+    );
+    const updatedRecord: ChatSessionRecord = {
+      id: this.activeSessionId || `SES-${Date.now()}`,
+      title: derivedTitle || 'New Session',
+      updatedAt: new Date().toISOString(),
+      messages: this.messages.slice(-60),
+      lastTurnId: this.lastTurnId,
+    };
+
+    if (existingIdx >= 0) {
+      this.sessions[existingIdx] = updatedRecord;
+    } else {
+      this.sessions.unshift(updatedRecord);
+    }
+
+    this.sessions = this.sessions
+      .slice()
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, MAX_STORED_SESSIONS);
+    this.activeSessionId = updatedRecord.id;
+
+    const payload: StoredSessionsPayload = {
+      activeSessionId: this.activeSessionId,
+      sessions: this.sessions,
+    };
+    await this.context.workspaceState.update(SESSION_STORAGE_KEY, payload);
+  }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
@@ -89,7 +170,13 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
       } else if (msg.type === 'showOutput') {
         this.output.show(true);
       } else if (msg.type === 'clear') {
-        this.clear();
+        await this.clear();
+      } else if (msg.type === 'newSession') {
+        await this.startNewSession();
+      } else if (msg.type === 'switchSession') {
+        await this.switchSession(String(msg.sessionId ?? ''));
+      } else if (msg.type === 'deleteSession') {
+        await this.deleteSession(String(msg.sessionId ?? ''));
       } else if (msg.type === 'openDiff') {
         await this.openDiff(String(msg.turnId ?? ''), String(msg.file ?? ''));
       } else if (msg.type === 'runRegressionLocal') {
@@ -110,12 +197,68 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
     void this.view?.webview.postMessage({type: 'prefill', text});
   }
 
-  public clear(): void {
+  public async clear(): Promise<void> {
     this.messages = [];
     this.traces = [];
     this.lastTurnId = null;
     this.error = null;
-    void this.syncState();
+    await this.persistActiveSession();
+    await this.syncState();
+  }
+
+  public async startNewSession(): Promise<void> {
+    if (this.busy) return;
+    await this.persistActiveSession();
+    const fresh = this.createEmptySession();
+    this.sessions.unshift(fresh);
+    this.sessions = this.sessions.slice(0, MAX_STORED_SESSIONS);
+    this.activeSessionId = fresh.id;
+    this.messages = [];
+    this.traces = [];
+    this.lastTurnId = null;
+    this.error = null;
+    await this.persistActiveSession();
+    await this.syncState();
+  }
+
+  public async switchSession(sessionId: string): Promise<void> {
+    if (this.busy || !sessionId || sessionId === this.activeSessionId) return;
+    await this.persistActiveSession();
+    const target = this.sessions.find((s) => s.id === sessionId);
+    if (!target) return;
+    this.activeSessionId = target.id;
+    this.messages = [...target.messages];
+    this.lastTurnId = target.lastTurnId ?? null;
+    this.traces = [];
+    this.error = null;
+    await this.context.workspaceState.update(SESSION_STORAGE_KEY, {
+      activeSessionId: this.activeSessionId,
+      sessions: this.sessions,
+    } satisfies StoredSessionsPayload);
+    await this.syncState();
+  }
+
+  public async deleteSession(sessionId: string): Promise<void> {
+    if (this.busy) return;
+    const idToDelete = sessionId || this.activeSessionId;
+    this.sessions = this.sessions.filter((s) => s.id !== idToDelete);
+    if (this.sessions.length === 0) {
+      const fresh = this.createEmptySession();
+      this.sessions = [fresh];
+    }
+    if (idToDelete === this.activeSessionId || !this.sessions.some((s) => s.id === this.activeSessionId)) {
+      const next = this.sessions[0];
+      this.activeSessionId = next.id;
+      this.messages = [...next.messages];
+      this.lastTurnId = next.lastTurnId ?? null;
+      this.traces = [];
+    }
+    this.error = null;
+    await this.context.workspaceState.update(SESSION_STORAGE_KEY, {
+      activeSessionId: this.activeSessionId,
+      sessions: this.sessions,
+    } satisfies StoredSessionsPayload);
+    await this.syncState();
   }
 
   public async runLocalRegressionSuite(): Promise<void> {
@@ -147,7 +290,7 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
       );
       if (report.passedCount === report.totalCount) {
         void vscode.window.showInformationMessage(
-          `ContextHarness 10-tool regression passed (${report.passedCount}/${report.totalCount}, ${report.durationMs}ms).`,
+          `ContextHarness ${report.totalCount}-tool regression passed (${report.passedCount}/${report.totalCount}, ${report.durationMs}ms).`,
         );
       } else {
         void vscode.window.showWarningMessage(
@@ -179,6 +322,7 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
       timestamp: new Date().toISOString(),
     });
     this.lastTurnId = null;
+    await this.persistActiveSession();
     await this.syncState();
     void vscode.window.showInformationMessage(
       `ContextHarness rolled back ${res.value.restoredFiles.length} file(s).`,
@@ -259,6 +403,124 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
     );
   }
 
+  private createLspBridge(workspaceDir: string): LspBridgePort {
+    const resolvedRoot = path.resolve(workspaceDir);
+
+    const resolveSafeUri = (relPath: string): vscode.Uri | null => {
+      const target = path.resolve(resolvedRoot, relPath);
+      if (target !== resolvedRoot && !target.startsWith(resolvedRoot + path.sep)) {
+        return null;
+      }
+      return vscode.Uri.file(target);
+    };
+
+    return {
+      getDocumentSymbols: async (relFiles: string[]): Promise<string | undefined> => {
+        const blocks: string[] = [];
+        for (const rel of relFiles.slice(0, 6)) {
+          const uri = resolveSafeUri(rel);
+          if (!uri) continue;
+          try {
+            const symbols = await vscode.commands.executeCommand<
+              Array<vscode.DocumentSymbol | vscode.SymbolInformation> | undefined
+            >('vscode.executeDocumentSymbolProvider', uri);
+            if (!symbols || symbols.length === 0) continue;
+
+            const lines: string[] = [];
+            const pushSym = (
+              sym: vscode.DocumentSymbol | vscode.SymbolInformation,
+              depth: number,
+            ) => {
+              if (lines.length >= 12) return;
+              const kindName = vscode.SymbolKind[sym.kind] ?? 'Sym';
+              const indent = depth > 0 ? '    ' : '  ';
+              if ('range' in sym) {
+                lines.push(`${indent}${sym.range.start.line + 1} | [${kindName}] ${sym.name}`);
+                if (depth < 1 && Array.isArray(sym.children)) {
+                  for (const child of sym.children) {
+                    pushSym(child, depth + 1);
+                  }
+                }
+              } else {
+                lines.push(
+                  `${indent}${sym.location.range.start.line + 1} | [${kindName}] ${sym.name}`,
+                );
+              }
+            };
+            for (const s of symbols) {
+              pushSym(s, 0);
+            }
+            if (lines.length > 0) {
+              blocks.push(`# ${rel}\n${lines.join('\n')}`);
+            }
+          } catch {
+            // ignore unsupported language provider errors
+          }
+        }
+        return blocks.length > 0 ? blocks.join('\n') : undefined;
+      },
+
+      findReferences: async (
+        relFile: string,
+        line: number,
+        symbol?: string,
+      ): Promise<string[]> => {
+        const uri = resolveSafeUri(relFile);
+        if (!uri) return [];
+        try {
+          const doc = await vscode.workspace.openTextDocument(uri);
+          const lineIdx = Math.max(0, Math.min(doc.lineCount - 1, line - 1));
+          const lineText = doc.lineAt(lineIdx).text;
+          let charIdx = 0;
+          if (symbol) {
+            const foundIdx = lineText.indexOf(symbol);
+            if (foundIdx >= 0) charIdx = foundIdx;
+          } else {
+            const identMatch = lineText.match(/[A-Za-z_]\w*/);
+            if (identMatch && typeof identMatch.index === 'number') {
+              charIdx = identMatch.index;
+            }
+          }
+
+          const locs = await vscode.commands.executeCommand<vscode.Location[] | undefined>(
+            'vscode.executeReferenceProvider',
+            uri,
+            new vscode.Position(lineIdx, charIdx),
+          );
+          if (!locs || locs.length === 0) return [];
+
+          const hits: string[] = [];
+          const textCache = new Map<string, string[]>();
+          for (const loc of locs.slice(0, 20)) {
+            const rel = path
+              .relative(resolvedRoot, loc.uri.fsPath)
+              .split(path.sep)
+              .join('/');
+            if (rel.startsWith('..')) continue;
+            const hitLine = loc.range.start.line;
+            let fileLines = textCache.get(loc.uri.fsPath);
+            if (!fileLines) {
+              try {
+                fileLines = fs
+                  .readFileSync(loc.uri.fsPath, 'utf8')
+                  .replace(/\r\n/g, '\n')
+                  .split('\n');
+              } catch {
+                fileLines = [];
+              }
+              textCache.set(loc.uri.fsPath, fileLines);
+            }
+            const snippet = (fileLines[hitLine] ?? '').trim().slice(0, 120);
+            hits.push(`${rel}:${hitLine + 1}: ${snippet}`);
+          }
+          return hits;
+        } catch {
+          return [];
+        }
+      },
+    };
+  }
+
   public async syncState(): Promise<void> {
     const workspaceDir = this.getWorkspaceDir();
     const apiKey = await this.resolveApiKey(workspaceDir);
@@ -269,6 +531,13 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
         hasApiKey: Boolean(apiKey),
         busy: this.busy,
         canRollback: Boolean(this.lastTurnId),
+        activeSessionId: this.activeSessionId,
+        sessions: this.sessions.map((s) => ({
+          id: s.id,
+          title: s.title,
+          updatedAt: s.updatedAt,
+          messageCount: s.messages.length,
+        })),
         messages: this.messages,
         traces: this.traces,
         regressionReport: this.regressionReport,
@@ -377,6 +646,14 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
         this.output.appendLine(
           `     [${ev.action.ok ? 'OK' : 'ERR'}] ${ev.action.summary}`,
         );
+      } else if (ev.type === 'ddi_rollback') {
+        this.live = {
+          ...this.live,
+          statusLine: `DDI Rollback & Rewrite (${ev.errorHash}): restored ${ev.restoredFiles.join(', ') || 'state'}`,
+        };
+        this.output.appendLine(
+          `  [DDI_ROLLBACK] (${ev.errorHash}) restored [${ev.restoredFiles.join(', ') || 'none'}]`,
+        );
       } else if (ev.type === 'ddi_escalate') {
         this.live = {
           ...this.live,
@@ -410,6 +687,7 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
         activeContext,
         externalDiagnostics,
         recentTurnsSummary,
+        lspBridge: this.createLspBridge(workspaceDir),
         onEvent,
       });
 
@@ -444,6 +722,7 @@ class ContextHarnessSidebarProvider implements vscode.WebviewViewProvider {
     } finally {
       this.busy = false;
       this.live = null;
+      await this.persistActiveSession();
       await this.syncState();
     }
   }
@@ -493,7 +772,7 @@ export function activate(context: vscode.ExtensionContext): void {
       provider.runLocalRegressionSuite(),
     ),
     vscode.commands.registerCommand('contextharness.clearChat', () => {
-      provider.clear();
+      void provider.clear();
     }),
   );
 }

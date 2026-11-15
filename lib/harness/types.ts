@@ -220,6 +220,7 @@ export type ChatToolName =
   | 'list_files'
   | 'list_dir'
   | 'grep_search'
+  | 'find_references'
   | 'read_slice'
   | 'write_file'
   | 'replace_lines'
@@ -250,6 +251,14 @@ export interface ChatMessageEntry {
   staticHeadHash?: string;
   actions?: ChatStepAction[];
   verifyPassed?: boolean;
+}
+
+export interface ChatSessionRecord {
+  id: string;
+  title: string;
+  updatedAt: string;
+  messages: ChatMessageEntry[];
+  lastTurnId: string | null;
 }
 
 export interface StepDebugTrace {
@@ -308,6 +317,12 @@ export type HarnessStreamEvent =
       type: 'tool_done';
       step: number;
       action: ChatStepAction;
+    }
+  | {
+      type: 'ddi_rollback';
+      step: number;
+      errorHash: string;
+      restoredFiles: string[];
     }
   | {
       type: 'ddi_escalate';

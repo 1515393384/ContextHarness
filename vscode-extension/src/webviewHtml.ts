@@ -102,6 +102,19 @@ export function getWebviewHtml(nonce: string): string {
       justify-content: space-between;
       gap: 4px;
     }
+    .session-bar {
+      padding: 5px 10px;
+      border-bottom: 1px solid var(--vscode-panel-border);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      background: var(--vscode-sideBar-background);
+    }
+    .session-bar select {
+      flex: 1;
+      min-width: 0;
+      text-overflow: ellipsis;
+    }
     .messages, .inspector-body {
       flex: 1;
       overflow-y: auto;
@@ -305,6 +318,12 @@ export function getWebviewHtml(nonce: string): string {
     <span id="key-status">Checking key...</span>
   </div>
 
+  <div class="session-bar">
+    <select id="session-select"></select>
+    <button id="btn-new-session" class="btn"></button>
+    <button id="btn-del-session" class="btn"></button>
+  </div>
+
   <div id="error-box" class="error-banner" style="display:none;">
     <span id="error-text"></span>
     <button id="btn-dismiss-err" class="btn">×</button>
@@ -338,6 +357,8 @@ export function getWebviewHtml(nonce: string): string {
       hasApiKey: false,
       busy: false,
       canRollback: false,
+      activeSessionId: '',
+      sessions: [],
       messages: [],
       traces: [],
       regressionReport: null,
@@ -354,6 +375,9 @@ export function getWebviewHtml(nonce: string): string {
         key: 'API Key',
         clear: 'Clear',
         langBtn: '中文',
+        newSession: '+ New',
+        delSession: 'Del',
+        emptySessionTitle: 'New Session',
         keyOk: 'Key Ready',
         keyMissing: 'Key Unset',
         selection: 'Active Selection',
@@ -361,14 +385,14 @@ export function getWebviewHtml(nonce: string): string {
         placeholder: 'Ask ContextHarness to build, edit, search, debug, or test... (Enter to send)',
         send: 'Send',
         sending: 'Streaming...',
-        empty: 'Bounded 4K-8K Context Driver ready. Supports all languages automatically (.gitignore + 9 tools + VS Code LSP Diagnostics + 1-click Turn Rollback).',
+        empty: 'Bounded 4K-8K Context Driver ready. Supports all languages automatically (.gitignore + 11 tools + VS Code LSP Symbols/Refs/Diagnostics + Pitfall Memory + Session History + 1-click Rollback).',
         you: 'You',
         agent: 'ContextHarness',
         diffPrefix: 'Diff: ',
         viewLogsBtn: 'Inspect AI Logs & Slots',
         liveTitle: 'Live Micro-Step',
         regTitle: 'All-Tools Regression Debug Suite',
-        regLocalBtn: 'Run Local 10-Tool Self-Test (0 Token)',
+        regLocalBtn: 'Run Local 11-Tool Self-Test (0 Token)',
         regAiBtn: 'Run Live AI Multi-Tool E2E',
         noTraces: 'No step traces recorded yet. Send a task or run regression to inspect AI raw outputs and all 4 Slots.',
         rawAiLabel: 'Raw AI Output',
@@ -383,6 +407,9 @@ export function getWebviewHtml(nonce: string): string {
         key: '密钥',
         clear: '清空',
         langBtn: 'EN',
+        newSession: '+ 新会话',
+        delSession: '删会话',
+        emptySessionTitle: '新会话',
         keyOk: '密钥已就绪',
         keyMissing: '未设密钥',
         selection: '带当前选区',
@@ -390,14 +417,14 @@ export function getWebviewHtml(nonce: string): string {
         placeholder: '输入开发、修改、排查或测试任务...（Enter 发送，Shift+Enter 换行）',
         send: '发送执行',
         sending: '流式执行中...',
-        empty: '4K-8K 固定预算上下文驱动器已就绪。自动适配全语言（.gitignore 过滤 + 9 工具集 + VS Code LSP 诊断直通 + 每轮快照一键回滚）。',
+        empty: '4K-8K 固定预算上下文驱动器已就绪。自动适配全语言（.gitignore 过滤 + 11 工具含 LSP 符号与 1-Hop 引用 + 避坑记忆持久化 + 多会话历史 + 每轮快照一键回滚）。',
         you: '你',
         agent: 'ContextHarness',
         diffPrefix: '对比 Diff: ',
         viewLogsBtn: '查看全栏 & AI 原始输出',
         liveTitle: '实时微步流',
         regTitle: '全工具回归自检流程（调试专用）',
-        regLocalBtn: '跑本地 10 项工具回归 (0 Token)',
+        regLocalBtn: '跑本地 11 项工具回归 (0 Token)',
         regAiBtn: '跑 AI 全链路工具回归 (Live)',
         noTraces: '暂无追踪日志。发送一次对话或运行工具回归后，可在此查看每步 AI 原始返回与 Slot 1-4 全栏目原文。',
         rawAiLabel: 'AI 原始返回 (Raw JSON)',
@@ -603,6 +630,20 @@ export function getWebviewHtml(nonce: string): string {
       document.getElementById('btn-lang').textContent = t.langBtn;
       document.getElementById('ws-label').textContent = state.workspaceName || 'No folder open';
       document.getElementById('key-status').textContent = state.hasApiKey ? t.keyOk : t.keyMissing;
+
+      const sessionSel = document.getElementById('session-select');
+      const sessions = Array.isArray(state.sessions) ? state.sessions : [];
+      sessionSel.innerHTML = sessions.map((s) => {
+        const label = (s.title === 'New Session' ? t.emptySessionTitle : s.title) + ' (' + (s.messageCount || 0) + ')';
+        const selected = s.id === state.activeSessionId ? ' selected' : '';
+        return '<option value="' + esc(s.id) + '"' + selected + '>' + esc(label) + '</option>';
+      }).join('');
+      sessionSel.disabled = state.busy;
+      document.getElementById('btn-new-session').textContent = t.newSession;
+      document.getElementById('btn-new-session').disabled = state.busy;
+      document.getElementById('btn-del-session').textContent = t.delSession;
+      document.getElementById('btn-del-session').disabled = state.busy;
+
       document.getElementById('lbl-selection').textContent = t.selection;
       document.getElementById('lbl-diag').textContent = t.diag;
       document.getElementById('prompt-input').placeholder = t.placeholder;
@@ -650,6 +691,15 @@ export function getWebviewHtml(nonce: string): string {
         e.preventDefault();
         sendTask();
       }
+    });
+    document.getElementById('session-select').addEventListener('change', (e) => {
+      vscode.postMessage({ type: 'switchSession', sessionId: e.target.value });
+    });
+    document.getElementById('btn-new-session').addEventListener('click', () => {
+      vscode.postMessage({ type: 'newSession' });
+    });
+    document.getElementById('btn-del-session').addEventListener('click', () => {
+      vscode.postMessage({ type: 'deleteSession', sessionId: state.activeSessionId });
     });
     document.getElementById('btn-rollback').addEventListener('click', () => vscode.postMessage({ type: 'rollback' }));
     document.getElementById('btn-output').addEventListener('click', () => vscode.postMessage({ type: 'showOutput' }));

@@ -107,6 +107,7 @@ export interface RepoHarnessRules {
   verifyCommand?: string;
   ignore?: string[];
   notes?: string[];
+  pitfalls?: string[];
 }
 
 export interface TurnFileBaseline {
@@ -242,6 +243,36 @@ async function loadRepoRulesAndIgnores(rootDir: string): Promise<{
   }
 
   return {rules, extraIgnoreNames, extraIgnorePrefixes};
+}
+
+export async function appendRepoPitfall(
+  rootDir: string,
+  pitfall: string,
+): Promise<void> {
+  const clean = pitfall.replace(/\s+/g, ' ').trim().slice(0, 160);
+  if (!clean) return;
+  const rulesPath = path.join(rootDir, REPO_RULES_FILE);
+  let current: RepoHarnessRules = {};
+  try {
+    const raw = await fs.readFile(rulesPath, 'utf8');
+    const parsed = JSON.parse(raw) as RepoHarnessRules;
+    if (parsed && typeof parsed === 'object') {
+      current = parsed;
+    }
+  } catch {
+    // create new .contextharness.json if missing
+  }
+  const existing = Array.isArray(current.pitfalls) ? current.pitfalls : [];
+  if (existing.includes(clean)) return;
+  const updated: RepoHarnessRules = {
+    ...current,
+    pitfalls: [...existing, clean].slice(-12),
+  };
+  try {
+    await fs.writeFile(rulesPath, `${JSON.stringify(updated, null, 2)}\n`, 'utf8');
+  } catch {
+    // ignore unwritable repo rules file
+  }
 }
 
 function shouldSkipFile(name: string): boolean {
@@ -520,6 +551,25 @@ export async function getTurnBaselineMap(
   return records[records.length - 1] ?? null;
 }
 
+async function restoreTurnRecordBaselines(
+  rootDir: string,
+  target: TurnSnapshotRecord,
+): Promise<string[]> {
+  const restoredFiles: string[] = [];
+  for (const baseline of Object.values(target.files)) {
+    const safe = resolveSafeWorkspacePath(rootDir, baseline.relPath);
+    if (safe.ok === false) continue;
+    if (baseline.existed && baseline.content !== null) {
+      await fs.mkdir(path.dirname(safe.value), {recursive: true});
+      await fs.writeFile(safe.value, baseline.content, 'utf8');
+    } else {
+      await fs.rm(safe.value, {force: true});
+    }
+    restoredFiles.push(baseline.relPath);
+  }
+  return restoredFiles;
+}
+
 export async function rollbackChatTurn(
   rootDir: string,
   turnId?: string | null,
@@ -543,19 +593,7 @@ export async function rollbackChatTurn(
   }
 
   const target = records[idx];
-  const restoredFiles: string[] = [];
-
-  for (const baseline of Object.values(target.files)) {
-    const safe = resolveSafeWorkspacePath(rootDir, baseline.relPath);
-    if (safe.ok === false) continue;
-    if (baseline.existed && baseline.content !== null) {
-      await fs.mkdir(path.dirname(safe.value), {recursive: true});
-      await fs.writeFile(safe.value, baseline.content, 'utf8');
-    } else {
-      await fs.rm(safe.value, {force: true});
-    }
-    restoredFiles.push(baseline.relPath);
-  }
+  const restoredFiles = await restoreTurnRecordBaselines(rootDir, target);
 
   records.splice(idx, 1);
   await writeTurnSnapshots(rootDir, records);
@@ -737,12 +775,14 @@ function buildChatStaticHead(tier: ModelTier): string {
   const schema = JSON.stringify({
     reasoning: 'concise 1-sentence reason for this step',
     action: {
-      tool: 'read_slice | write_file | replace_lines | grep_search | list_dir | delete_file | move_file | run_command | finish',
-      file: 'relative path (read_slice/write_file/replace_lines/delete_file)',
+      tool: 'read_slice | write_file | replace_lines | grep_search | find_references | list_dir | delete_file | move_file | run_command | finish',
+      file: 'relative path (read_slice/write_file/replace_lines/delete_file/find_references)',
       from: 'source relative path (move_file)',
       to: 'destination relative path (move_file)',
       path: 'optional subdir (grep_search/list_dir)',
       pattern: 'regex or text (grep_search)',
+      symbol: 'symbol name fallback (find_references)',
+      line: '1-based line number (find_references)',
       fileGlob: 'optional extension filter like .py or .ts (grep_search)',
       maxDepth: 'optional depth 1-4 (list_dir)',
       startLine: 'number (read_slice/replace_lines)',
@@ -756,9 +796,9 @@ function buildChatStaticHead(tier: ModelTier): string {
   });
 
   return [
-    `[STATIC_CHAT_HARNESS_PREFIX v2 | tier=${tier}]`,
+    `[STATIC_CHAT_HARNESS_PREFIX v3 | tier=${tier}]`,
     'ROLE: Stateless Bounded-Context Multi-Language Engineering Agent operating inside the active workspace within 4K-8K tokens/step.',
-    'RULES: (1) Locate symbols in large repos with grep_search or list_dir first, then read exact ranges with read_slice. (2) Edit via write_file or replace_lines (never include "12 | " prefixes). (3) Use delete_file/move_file for refactors. (4) Verify changes via run_command (using the repo language test/typecheck tool, e.g. pytest, unittest, npm test, cargo test, go test) before finish. (5) You may save repo-specific verifyCommand/ignore rules to .contextharness.json if helpful. (6) Output ONLY one valid JSON object matching RESPONSE_JSON_SCHEMA.',
+    'RULES: (1) Locate symbols/callers in large repos with grep_search, find_references, or list_dir first, then read exact ranges with read_slice. (2) Edit via write_file or replace_lines (never include "12 | " prefixes). (3) Use delete_file/move_file for refactors. (4) Verify changes via run_command (using the repo language test/typecheck tool, e.g. pytest, unittest, npm test, cargo test, go test) before finish. (5) You may save repo-specific verifyCommand/ignore rules to .contextharness.json if helpful. (6) Output ONLY one valid JSON object matching RESPONSE_JSON_SCHEMA.',
     `RESPONSE_JSON_SCHEMA: ${schema}`,
   ].join('\n');
 }
@@ -827,11 +867,21 @@ function parseModelJsonObject<T>(raw: string): T | null {
 const UNIVERSAL_SYMBOL_RE =
   /^(export\s+(default\s+)?(async\s+)?(function|class|interface|type|const|enum)\b|async\s+def\s+|def\s+|class\s+|pub\s+(async\s+)?(fn|struct|enum|trait|mod|type)\b|fn\s+|struct\s+|impl\b|func\s+|(public|private|protected|internal)\s+.*\(|interface\s+\w+|type\s+\w+\s*=)/;
 
+export interface LspBridgePort {
+  getDocumentSymbols?: (relFiles: string[]) => Promise<string | undefined>;
+  findReferences?: (
+    relFile: string,
+    line: number,
+    symbol?: string,
+  ) => Promise<string[]>;
+}
+
 async function buildWorkspaceSkeleton(
   rootDir: string,
   files: string[],
   priorityFiles: string[],
   rules: RepoHarnessRules,
+  lspBridge?: LspBridgePort,
 ): Promise<string> {
   if (files.length === 0) {
     return '[WORKSPACE_FILES]\n(empty directory)';
@@ -842,6 +892,14 @@ async function buildWorkspaceSkeleton(
   }
   if (rules.notes && rules.notes.length > 0) {
     previewLines.push(`[REPO_NOTES] ${rules.notes.slice(0, 3).join(' | ')}`);
+  }
+  if (rules.pitfalls && rules.pitfalls.length > 0) {
+    previewLines.push(
+      `[REPO_PITFALLS]\n${rules.pitfalls
+        .slice(-5)
+        .map((p) => `- ${p}`)
+        .join('\n')}`,
+    );
   }
 
   for (const rel of files.slice(0, 70)) {
@@ -857,24 +915,40 @@ async function buildWorkspaceSkeleton(
     ...files.filter((f) => codeExts.test(f) && !priorityFiles.includes(f)),
   ];
 
-  for (const rel of prioritized.slice(0, 10)) {
-    const safe = resolveSafeWorkspacePath(rootDir, rel);
-    if (safe.ok === false) continue;
+  const topTargets = prioritized.slice(0, 8);
+  let lspIncluded = false;
+  if (lspBridge?.getDocumentSymbols && topTargets.length > 0) {
     try {
-      const stat = await fs.stat(safe.value);
-      if (stat.size > MAX_SCAN_FILE_BYTES) continue;
-      const content = (await fs.readFile(safe.value, 'utf8')).replace(/\r\n/g, '\n');
-      const sigs = content
-        .split('\n')
-        .map((l, idx) => ({line: l.trim(), num: idx + 1}))
-        .filter(({line}) => UNIVERSAL_SYMBOL_RE.test(line))
-        .slice(0, 10)
-        .map(({line, num}) => `  ${num} | ${line.replace(/\{[\s\S]*$/, '{ ... }')}`);
-      if (sigs.length > 0) {
-        previewLines.push(`# ${rel}\n${sigs.join('\n')}`);
+      const lspSummary = await lspBridge.getDocumentSymbols(topTargets);
+      if (lspSummary?.trim()) {
+        previewLines.push(`[LSP_SYMBOLS]\n${lspSummary.trim()}`);
+        lspIncluded = true;
       }
     } catch {
-      // ignore unreadable file
+      // fall back to universal regex skeleton
+    }
+  }
+
+  if (!lspIncluded) {
+    for (const rel of prioritized.slice(0, 10)) {
+      const safe = resolveSafeWorkspacePath(rootDir, rel);
+      if (safe.ok === false) continue;
+      try {
+        const stat = await fs.stat(safe.value);
+        if (stat.size > MAX_SCAN_FILE_BYTES) continue;
+        const content = (await fs.readFile(safe.value, 'utf8')).replace(/\r\n/g, '\n');
+        const sigs = content
+          .split('\n')
+          .map((l, idx) => ({line: l.trim(), num: idx + 1}))
+          .filter(({line}) => UNIVERSAL_SYMBOL_RE.test(line))
+          .slice(0, 10)
+          .map(({line, num}) => `  ${num} | ${line.replace(/\{[\s\S]*$/, '{ ... }')}`);
+        if (sigs.length > 0) {
+          previewLines.push(`# ${rel}\n${sigs.join('\n')}`);
+        }
+      } catch {
+        // ignore unreadable file
+      }
     }
   }
 
@@ -887,6 +961,7 @@ interface ParsedChatAction {
     | 'write_file'
     | 'replace_lines'
     | 'grep_search'
+    | 'find_references'
     | 'list_dir'
     | 'delete_file'
     | 'move_file'
@@ -898,6 +973,8 @@ interface ParsedChatAction {
   to?: string;
   path?: string;
   pattern?: string;
+  symbol?: string;
+  line?: number;
   fileGlob?: string;
   maxDepth?: number;
   startLine?: number;
@@ -929,6 +1006,7 @@ export interface WorkspaceChatTurnInput {
   activeContext?: string;
   externalDiagnostics?: string;
   recentTurnsSummary?: string;
+  lspBridge?: LspBridgePort;
   onEvent?: (event: HarnessStreamEvent) => void;
 }
 
@@ -1115,6 +1193,8 @@ function buildSlot3WithLru(params: {
   modifiedFiles: string[];
   stepLedger: string[];
   failedNotes: string[];
+  pitfallHint?: string | null;
+  widened1HopCallers?: string[];
   openSlices: Map<string, OpenSliceEntry>;
   maxTokens: number;
 }): {text: string; tokens: number; pruned: boolean} {
@@ -1127,6 +1207,14 @@ function buildSlot3WithLru(params: {
   }
   if (params.activeContext?.trim()) {
     headerParts.push(`[ACTIVE_EDITOR_CONTEXT]\n${params.activeContext.trim()}`);
+  }
+  if (params.pitfallHint?.trim()) {
+    headerParts.push(`[DDI_PITFALL_HINT]\n${params.pitfallHint.trim()}`);
+  }
+  if (params.widened1HopCallers && params.widened1HopCallers.length > 0) {
+    headerParts.push(
+      `[1HOP_CALLERS]\n${params.widened1HopCallers.slice(0, 12).join('\n')}`,
+    );
   }
   if (
     params.stepLedger.length > 0 ||
@@ -1207,6 +1295,7 @@ export async function runWorkspaceChatTurn(
     activeContext,
     externalDiagnostics,
     recentTurnsSummary,
+    lspBridge,
     onEvent,
   } = input;
 
@@ -1239,6 +1328,10 @@ export async function runWorkspaceChatTurn(
     : '[STATUS] Clean turn start. 0 prior tool steps.';
   let lastErrorHash: string | null = null;
   let errorRepeatCount = 0;
+  let ddiRewrittenOnce = false;
+  let pitfallHint: string | null = null;
+  let recoveredPitfallToSave: string | null = null;
+  let widened1HopCallers: string[] = [];
   let loopGuardHits = 0;
   let lastVerifyPassed: boolean | undefined;
   let totalCacheHits = 0;
@@ -1269,6 +1362,7 @@ export async function runWorkspaceChatTurn(
       files,
       priorityFiles,
       rules,
+      lspBridge,
     );
 
     const slot1Fit = truncateToTokenBudget(buildChatStaticHead(activeTier), 1000);
@@ -1282,6 +1376,8 @@ export async function runWorkspaceChatTurn(
       modifiedFiles,
       stepLedger,
       failedNotes,
+      pitfallHint,
+      widened1HopCallers,
       openSlices,
       maxTokens: 2500,
     });
@@ -1503,6 +1599,55 @@ export async function runWorkspaceChatTurn(
         recordAction('grep_search', act.pattern ?? '', false, res.error.message);
         latestFeedback = `[GREP_ERR] ${res.error.message}`;
       }
+    } else if (act.tool === 'find_references') {
+      const target = (act.file ?? '').trim();
+      const lineNum = Math.max(1, act.line ?? act.startLine ?? 1);
+      const symbolName = (act.symbol ?? act.pattern ?? '').trim();
+      let refs: string[] = [];
+      let sourceNote = 'grep';
+
+      if (target && lspBridge?.findReferences) {
+        try {
+          refs = await lspBridge.findReferences(
+            target,
+            lineNum,
+            symbolName || undefined,
+          );
+          if (refs.length > 0) sourceNote = 'LSP';
+        } catch {
+          refs = [];
+        }
+      }
+
+      if (refs.length === 0 && symbolName) {
+        const gRes = await grepWorkspaceFiles(workspaceDir, symbolName, '.', undefined);
+        if (gRes.ok === true) {
+          refs = gRes.value.matches.slice(0, 20);
+          for (const mf of gRes.value.matchedFiles.slice(0, 5)) {
+            addPriorityFile(mf);
+          }
+        }
+      } else {
+        for (const r of refs.slice(0, 5)) {
+          const hitFile = r.split(':')[0]?.trim();
+          if (hitFile) addPriorityFile(hitFile);
+        }
+      }
+
+      const refTarget = target
+        ? `${target}:${lineNum}${symbolName ? ` (${symbolName})` : ''}`
+        : symbolName || 'workspace';
+      if (refs.length > 0) {
+        const summary = `${refs.length} reference(s) via ${sourceNote}`;
+        recordAction('find_references', refTarget, true, summary);
+        latestFeedback = `[REFS_OK] ${summary}:\n${refs.slice(0, 20).join('\n')}`;
+      } else if (!target && !symbolName) {
+        recordAction('find_references', refTarget, false, 'file+line or symbol required');
+        latestFeedback = '[REFS_ERR] Provide file + line or symbol for find_references.';
+      } else {
+        recordAction('find_references', refTarget, true, `0 references (${sourceNote})`);
+        latestFeedback = `[REFS_OK] 0 references found for ${refTarget}.`;
+      }
     } else if (act.tool === 'list_dir') {
       const res = await listDirectoryEntries(
         workspaceDir,
@@ -1689,6 +1834,11 @@ export async function runWorkspaceChatTurn(
       );
 
       if (v.passed) {
+        if (recoveredPitfallToSave) {
+          await appendRepoPitfall(workspaceDir, recoveredPitfallToSave);
+          recoveredPitfallToSave = null;
+          pitfallHint = null;
+        }
         lastErrorHash = null;
         errorRepeatCount = 0;
         latestFeedback = `[VERIFY_PASS] ${v.summary}\n${v.output}`;
@@ -1701,17 +1851,75 @@ export async function runWorkspaceChatTurn(
         }
 
         let ddiHint = '';
-        if (errorRepeatCount >= 2 && activeTier !== 'pro') {
-          const prevTier = activeTier;
-          activeTier = 'pro';
+        if (errorRepeatCount >= 2 && !ddiRewrittenOnce) {
+          ddiRewrittenOnce = true;
+          errorRepeatCount = 0;
+          const restored =
+            Object.keys(turnRecord.files).length > 0
+              ? await restoreTurnRecordBaselines(workspaceDir, turnRecord)
+              : [];
+          for (const rf of restored) {
+            openSlices.delete(rf);
+          }
+          toolSigCounts.clear();
+          modifiedFiles.length = 0;
+          pitfallHint = `Identical errorHash=${v.errorHash} repeated; rolled back ${restored.join(', ') || 'turn state'}. Cause: ${v.summary.slice(0, 140)}`;
+          recoveredPitfallToSave = `Avoid [${v.errorHash}]: ${v.summary.slice(0, 110)}`;
           onEvent?.({
-            type: 'ddi_escalate',
+            type: 'ddi_rollback',
             step,
             errorHash: v.errorHash ?? 'UNKNOWN',
-            fromTier: prevTier,
-            toTier: 'pro',
+            restoredFiles: restored,
           });
-          ddiHint = `\n[DDI_CIRCUIT_BREAKER] Identical errorHash=${v.errorHash} repeated ${errorRepeatCount} times; escalated to Pro tier.`;
+          ddiHint = `\n[DDI_ROLLBACK_AND_REWRITE] Identical errorHash=${v.errorHash} hit twice. Auto-restored [${restored.join(', ') || 'none'}] to baseline; rethink approach cleanly before rewriting.`;
+        } else if (errorRepeatCount >= 2 && ddiRewrittenOnce) {
+          const prevTier = activeTier;
+          if (activeTier !== 'pro') {
+            activeTier = 'pro';
+            onEvent?.({
+              type: 'ddi_escalate',
+              step,
+              errorHash: v.errorHash ?? 'UNKNOWN',
+              fromTier: prevTier,
+              toTier: 'pro',
+            });
+          }
+
+          const collectedCallers: string[] = [];
+          const seedFiles = priorityFiles.slice(0, 2);
+          for (const sf of seedFiles) {
+            const safeSeed = resolveSafeWorkspacePath(workspaceDir, sf);
+            if (safeSeed.ok === false) continue;
+            try {
+              const rawSeed = (await fs.readFile(safeSeed.value, 'utf8')).replace(/\r\n/g, '\n');
+              const lines = rawSeed.split('\n');
+              const symIdx = lines.findIndex((l) => UNIVERSAL_SYMBOL_RE.test(l.trim()));
+              if (symIdx !== -1) {
+                const symLine = lines[symIdx].trim();
+                const nameMatch = symLine.match(
+                  /(?:function|class|interface|type|const|def|fn|func|struct|enum)\s+([A-Za-z_]\w*)/,
+                );
+                const symName = nameMatch?.[1];
+                if (lspBridge?.findReferences) {
+                  const lspHits = await lspBridge.findReferences(sf, symIdx + 1, symName);
+                  collectedCallers.push(...lspHits.slice(0, 6));
+                }
+                if (collectedCallers.length === 0 && symName) {
+                  const gHits = await grepWorkspaceFiles(workspaceDir, symName, '.', undefined);
+                  if (gHits.ok === true) {
+                    collectedCallers.push(...gHits.value.matches.slice(0, 6));
+                  }
+                }
+              }
+            } catch {
+              // ignore unreadable seed
+            }
+          }
+          if (collectedCallers.length > 0) {
+            widened1HopCallers = Array.from(new Set(collectedCallers)).slice(0, 12);
+          }
+
+          ddiHint = `\n[DDI_WIDEN_1HOP_AND_ESCALATE_PRO] ErrorHash=${v.errorHash} persisted after rewrite; escalated to Pro (8K) & pulled ${widened1HopCallers.length} 1-hop caller ref(s) into Slot 3.`;
         }
         latestFeedback = `[VERIFY_FAIL hash=${v.errorHash}] ${v.summary}\n${v.output}${ddiHint}`;
       }
@@ -1952,6 +2160,34 @@ export async function runAllToolsRegression(
           rb.ok === true
             ? `Restored ${rb.value.restoredFiles.join(', ')} -> "${after}"`
             : rb.error.message,
+      };
+    });
+
+    await runCheck('11. find_references & .contextharness.json pitfalls', async () => {
+      const defRel = `${sandboxRel}/def_mod.ts`;
+      const useRel = `${sandboxRel}/caller_mod.ts`;
+      const safeDef = resolveSafeWorkspacePath(workspaceDir, defRel);
+      const safeUse = resolveSafeWorkspacePath(workspaceDir, useRel);
+      if (safeDef.ok === false || safeUse.ok === false) {
+        return {ok: false, detail: 'Safe path check failed'};
+      }
+      await fs.writeFile(safeDef.value, 'export function targetHelper() { return 42; }\n', 'utf8');
+      await fs.writeFile(
+        safeUse.value,
+        'import {targetHelper} from "./def_mod";\nexport const v = targetHelper();\n',
+        'utf8',
+      );
+      const grepRes = await grepWorkspaceFiles(workspaceDir, 'targetHelper', sandboxRel, '.ts');
+      await appendRepoPitfall(sandboxAbs, 'Selftest pitfall anchor check');
+      const loaded = await loadRepoRulesAndIgnores(sandboxAbs);
+      const hasCaller =
+        grepRes.ok === true && grepRes.value.matches.some((m) => m.includes('caller_mod.ts:2:'));
+      const hasPitfall = Boolean(
+        loaded.rules.pitfalls?.includes('Selftest pitfall anchor check'),
+      );
+      return {
+        ok: hasCaller && hasPitfall,
+        detail: `callerRef=${hasCaller}, pitfallPersisted=${hasPitfall}`,
       };
     });
   } finally {
